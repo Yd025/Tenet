@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useConversationStore } from '../store/useConversationStore';
 // import { fetchChat } from '../api/client';  // TODO: re-enable when Ollama is running
-import type { ModelId } from '../types';
+import type { ConversationNode, ModelId } from '../types';
 import MessageBubble from '../components/MessageBubble';
 import CommitInputBar from '../components/CommitInputBar';
 
@@ -41,10 +41,10 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
   // Build thread inline so it's driven by reactive subscriptions, not get()
   const thread = useMemo(() => {
     if (!headNodeId) return [];
-    const result = [];
+    const result: ConversationNode[] = [];
     let currentId: string | null = headNodeId;
     while (currentId !== null) {
-      const node = nodes[currentId];
+      const node: ConversationNode | undefined = nodes[currentId];
       if (!node || node.pruned) break;
       result.push(node);
       currentId = node.parent_id;
