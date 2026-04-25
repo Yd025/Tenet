@@ -28,4 +28,4 @@ export interface TelemetryStats {
   tps: number;
 }
 
-export type ModelId = 'deepseek' | 'qwen' | 'gemma4';
+export type ModelId = 'deepseek' | 'qwen' | 'gemma4' | 'system';

@@ -7,6 +7,7 @@ interface MessageBubbleProps {
 
 export default function MessageBubble({ node, isHead }: MessageBubbleProps) {
   const modelLabels: Record<string, string> = {
+    system: 'System',
     gemma4: 'Gemma 4 • local',
     deepseek: 'DeepSeek R1 • local',
     qwen: 'Qwen 2.5 • local',
