@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronRight, ChevronDown } from 'lucide-react';
+import { ChevronRight, ChevronDown, PanelLeft } from 'lucide-react';
 import { useConversationStore } from '../store/useConversationStore';
 
 interface TopNavProps {
@@ -7,11 +7,25 @@ interface TopNavProps {
   setActiveTab: (tab: 'chats' | 'branch-history') => void;
   selectedModel: string;
   setSelectedModel: (model: string) => void;
+  sidebarOpen: boolean;
+  onToggleSidebar: () => void;
 }
+
+const MODEL_LABELS: Record<string, string> = {
+  deepseek: 'DeepSeek R1',
+  qwen: 'Qwen 2.5',
+};
 
 const MODELS = ['deepseek', 'qwen'];
 
-export default function TopNav({ activeTab, setActiveTab, selectedModel, setSelectedModel }: TopNavProps) {
+export default function TopNav({
+  activeTab,
+  setActiveTab,
+  selectedModel,
+  setSelectedModel,
+  sidebarOpen,
+  onToggleSidebar,
+}: TopNavProps) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
 
   const { activeConversationId, conversations } = useConversationStore((s) => ({
@@ -23,12 +37,27 @@ export default function TopNav({ activeTab, setActiveTab, selectedModel, setSele
   const conversationTitle = activeConversation?.title ?? 'Untitled';
 
   return (
-    <div className="bg-tenet-surface border-b border-tenet-border h-12 flex items-center px-4 gap-4">
+    <div className="bg-tenet-surface border-b border-tenet-border h-12 flex items-center px-3 gap-3 flex-shrink-0">
+      {/* Sidebar toggle */}
+      <button
+        onClick={onToggleSidebar}
+        className={`p-1.5 rounded transition-colors ${
+          sidebarOpen
+            ? 'text-gray-500 hover:text-white hover:bg-white/5'
+            : 'text-tenet-teal hover:bg-tenet-teal/10'
+        }`}
+        title={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
+      >
+        <PanelLeft size={16} />
+      </button>
+
       {/* Breadcrumb */}
       <div className="flex items-center gap-1 flex-shrink-0">
         <span className="text-gray-500 text-sm">Conversations</span>
         <ChevronRight className="text-gray-600" size={12} />
-        <span className="text-white text-sm font-medium">{conversationTitle}</span>
+        <span className="text-white text-sm font-medium truncate max-w-[200px]">
+          {conversationTitle}
+        </span>
       </div>
 
       {/* Tab switcher — centered */}
@@ -59,13 +88,14 @@ export default function TopNav({ activeTab, setActiveTab, selectedModel, setSele
       <div className="relative flex-shrink-0">
         <button
           onClick={() => setDropdownOpen((o) => !o)}
-          className="flex items-center gap-1 text-sm border border-tenet-border rounded px-3 py-1 bg-tenet-bg text-gray-300 hover:text-white transition-colors"
+          className="flex items-center gap-1.5 text-xs border border-tenet-border rounded-lg px-3 py-1.5 bg-tenet-bg text-gray-300 hover:text-white hover:border-gray-500 transition-colors"
         >
-          {selectedModel}
-          <ChevronDown size={14} />
+          <span className="text-gray-500 mr-0.5">Model:</span>
+          {MODEL_LABELS[selectedModel] ?? selectedModel}
+          <ChevronDown size={12} />
         </button>
         {dropdownOpen && (
-          <div className="absolute right-0 top-full mt-1 bg-tenet-surface border border-tenet-border rounded shadow-lg z-10 min-w-full">
+          <div className="absolute right-0 top-full mt-1 bg-tenet-surface border border-tenet-border rounded-lg shadow-lg z-10 min-w-[140px] overflow-hidden">
             {MODELS.map((model) => (
               <button
                 key={model}
@@ -73,11 +103,11 @@ export default function TopNav({ activeTab, setActiveTab, selectedModel, setSele
                   setSelectedModel(model);
                   setDropdownOpen(false);
                 }}
-                className={`block w-full text-left px-3 py-2 text-sm hover:bg-tenet-bg transition-colors ${
+                className={`block w-full text-left px-3 py-2 text-sm hover:bg-white/5 transition-colors ${
                   model === selectedModel ? 'text-tenet-teal' : 'text-gray-300'
                 }`}
               >
-                {model}
+                {MODEL_LABELS[model]}
               </button>
             ))}
           </div>

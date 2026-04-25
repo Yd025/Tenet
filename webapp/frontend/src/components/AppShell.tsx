@@ -12,6 +12,7 @@ export default function AppShell() {
 
   const [activeTab, setActiveTab] = useState<'chats' | 'branch-history'>('chats');
   const [selectedModel, setSelectedModel] = useState('deepseek');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   useEffect(() => {
     if (conversationId) {
@@ -20,9 +21,14 @@ export default function AppShell() {
   }, [conversationId, setActiveConversation]);
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      {/* Left: sidebar */}
-      <Sidebar />
+    <div className="flex h-screen overflow-hidden bg-tenet-bg">
+      {/* Left: sidebar — slides in/out */}
+      <div
+        className="flex-shrink-0 transition-all duration-200 overflow-hidden"
+        style={{ width: sidebarOpen ? 240 : 0 }}
+      >
+        <Sidebar onClose={() => setSidebarOpen(false)} />
+      </div>
 
       {/* Right: main panel */}
       <div className="flex-1 flex flex-col min-w-0">
@@ -31,6 +37,8 @@ export default function AppShell() {
           setActiveTab={setActiveTab}
           selectedModel={selectedModel}
           setSelectedModel={setSelectedModel}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={() => setSidebarOpen((o) => !o)}
         />
         {activeTab === 'chats' ? (
           <ChatView selectedModel={selectedModel} />
