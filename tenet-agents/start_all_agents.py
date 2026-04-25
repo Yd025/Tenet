@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -13,6 +14,23 @@ from run_all_agents import AGENTS
 
 
 STABILIZATION_WAIT_SECONDS = 8
+
+
+def _resolve_ca_bundle() -> Optional[str]:
+    """Resolve CA bundle path for TLS verification in spawned agents."""
+    for env_key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        existing = os.environ.get(env_key)
+        if existing and Path(existing).exists():
+            return existing
+    try:
+        import certifi  # type: ignore
+
+        return certifi.where()
+    except Exception:
+        default_paths = ssl.get_default_verify_paths()
+        if default_paths.cafile and Path(default_paths.cafile).exists():
+            return default_paths.cafile
+    return None
 
 
 def is_port_open(port: int, host: str = "127.0.0.1") -> bool:
@@ -44,6 +62,11 @@ def start_agent(script_path: str, python_exe: str):
     env["PYTHONPATH"] = (
         f"{package_root}:{existing_pythonpath}" if existing_pythonpath else str(package_root)
     )
+    ca_bundle = _resolve_ca_bundle()
+    if ca_bundle:
+        env["SSL_CERT_FILE"] = ca_bundle
+        env["REQUESTS_CA_BUNDLE"] = ca_bundle
+        env["CURL_CA_BUNDLE"] = ca_bundle
     process = subprocess.Popen(
         [python_exe, "-m", module_name],
         stdout=subprocess.PIPE,
@@ -121,7 +144,12 @@ def main():
     print("🚀 Starting Tenet local agents")
     print("=" * 56)
     python_exe = _resolve_python()
+    ca_bundle = _resolve_ca_bundle()
     print(f"🐍 Python executable: {python_exe}")
+    if ca_bundle:
+        print(f"🔐 TLS CA bundle: {ca_bundle}")
+    else:
+        print("⚠️  TLS CA bundle not found (mailbox TLS may fail).")
     processes = []
     proc_by_name = {}
     logs_buffer: dict[str, list[str]] = {}
