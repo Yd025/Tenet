@@ -20,7 +20,16 @@ interface BranchHistoryViewProps {
 const nodeTypes = { conversationNode: ConversationNodeComponent };
 
 // ---------------------------------------------------------------------------
-// Graph builder
+// Layout constants
+// ---------------------------------------------------------------------------
+const Y_STEP = 110;
+const Y_START = 60;
+const TRUNK_X = 160;
+const BRANCH_BASE_X = 420;
+const BRANCH_X_GAP = 220;
+
+// ---------------------------------------------------------------------------
+// Graph builder — layer-based layout (no node overlap)
 // ---------------------------------------------------------------------------
 function buildFlowGraph(
   storeNodes: Record<string, ConversationNode>,
@@ -33,111 +42,132 @@ function buildFlowGraph(
     onSelect: (id: string) => void;
   },
 ): { nodes: Node[]; edges: Edge[] } {
-  const flowNodes: Node[] = [];
-  const flowEdges: Edge[] = [];
+  // Filter pruned, sort by timestamp so parents are always processed before children
+  const activeNodes = Object.values(storeNodes)
+    .filter((n) => !n.pruned)
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-  // Filter out pruned nodes
-  const activeNodes = Object.values(storeNodes).filter((n) => !n.pruned);
+  // --- Layer assignment: depth from root ---
+  // Each node's layer = max(parent_layer, merge_parent_layer) + 1
+  const layerMap: Record<string, number> = {};
+  for (const node of activeNodes) {
+    let layer = 0;
+    if (node.parent_id && layerMap[node.parent_id] !== undefined) {
+      layer = Math.max(layer, layerMap[node.parent_id] + 1);
+    }
+    if (node.merge_parent_id && layerMap[node.merge_parent_id] !== undefined) {
+      layer = Math.max(layer, layerMap[node.merge_parent_id] + 1);
+    }
+    layerMap[node.node_id] = layer;
+  }
 
-  // Sort by timestamp for stable ordering
-  const sorted = [...activeNodes].sort(
-    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-  );
-
-  // Assign labels: count main trunk vs branch nodes
+  // --- Labels ---
   let trunkCount = 0;
   let branchCount = 0;
   const labelMap: Record<string, string> = {};
   const sublabelMap: Record<string, string> = {};
 
-  for (const node of sorted) {
+  for (const node of activeNodes) {
     if (node.branch_label) {
       branchCount += 1;
-      // Find parent label for context
-      const parentLabel = node.parent_id ? labelMap[node.parent_id] ?? '?' : '?';
+      const parentLabel = node.parent_id ? (labelMap[node.parent_id] ?? '?') : '?';
       labelMap[node.node_id] = `b${branchCount}/${parentLabel}`;
       sublabelMap[node.node_id] = node.branch_label;
     } else if (node.is_merge_node) {
-      // Merge nodes get a trunk label
       trunkCount += 1;
       labelMap[node.node_id] = `v${trunkCount}`;
-      sublabelMap[node.node_id] = 'Merge';
+      sublabelMap[node.node_id] = '⎇ Merge';
     } else {
       trunkCount += 1;
       labelMap[node.node_id] = `v${trunkCount}`;
-      // Use first 40 chars of prompt as sublabel
-      sublabelMap[node.node_id] = node.prompt.slice(0, 40) || 'Node';
+      sublabelMap[node.node_id] = node.prompt.slice(0, 38) || 'Node';
     }
   }
 
-  // Position assignment: simple top-down
-  let trunkY = 50;
-  let branchY = 50;
-
+  // --- Position assignment ---
+  // Y = layer * Y_STEP (single global counter — no collisions)
+  // X = TRUNK_X for trunk nodes; BRANCH_BASE_X + col*gap for branch nodes
+  // Multiple branch nodes in the same layer get staggered right
   const posMap: Record<string, { x: number; y: number }> = {};
+  const branchColAtLayer: Record<number, number> = {};
 
-  for (const node of sorted) {
-    const isBranch = node.branch_label !== null;
+  for (const node of activeNodes) {
+    const layer = layerMap[node.node_id] ?? 0;
+    const y = Y_START + layer * Y_STEP;
+    const isBranch = node.branch_label !== null || node.is_merge_node;
+
     if (isBranch) {
-      posMap[node.node_id] = { x: 380, y: branchY };
-      branchY += 130;
+      const col = branchColAtLayer[layer] ?? 0;
+      branchColAtLayer[layer] = col + 1;
+      posMap[node.node_id] = { x: BRANCH_BASE_X + col * BRANCH_X_GAP, y };
     } else {
-      posMap[node.node_id] = { x: 200, y: trunkY };
-      trunkY += 130;
+      posMap[node.node_id] = { x: TRUNK_X, y };
     }
   }
 
-  // Build react-flow nodes
-  for (const node of sorted) {
-    const isBranch = node.branch_label !== null;
-    const isHead = node.node_id === headNodeId;
-    const isSelected = selectedNodeIds.includes(node.node_id);
-
+  // --- Flow nodes ---
+  const flowNodes: Node[] = activeNodes.map((node) => {
     const data: ConversationNodeData = {
       label: labelMap[node.node_id] ?? node.node_id.slice(0, 8),
       sublabel: sublabelMap[node.node_id] ?? '',
-      isHead,
-      isBranch,
+      isHead: node.node_id === headNodeId,
+      isBranch: node.branch_label !== null,
       isMerge: node.is_merge_node,
-      isSelected,
+      isSelected: selectedNodeIds.includes(node.node_id),
       nodeId: node.node_id,
       ...handlers,
     };
-
-    flowNodes.push({
+    return {
       id: node.node_id,
       type: 'conversationNode',
-      position: posMap[node.node_id] ?? { x: 200, y: 50 },
+      position: posMap[node.node_id] ?? { x: TRUNK_X, y: Y_START },
       data,
-    });
-  }
+    };
+  });
 
-  // Build edges
-  for (const node of sorted) {
-    const isBranch = node.branch_label !== null || node.is_merge_node;
+  // --- Flow edges ---
+  // Trunk→trunk: straight down  (source bottom → target top)
+  // Trunk→branch: curve right   (source right  → target left)
+  // Branch→branch: straight down (source bottom → target top)
+  const flowEdges: Edge[] = [];
 
+  for (const node of activeNodes) {
     if (node.parent_id && storeNodes[node.parent_id] && !storeNodes[node.parent_id].pruned) {
-      const edgeStyle = isBranch
-        ? { stroke: '#555', strokeWidth: 1, strokeDasharray: '5 3' }
-        : { stroke: '#333', strokeWidth: 1 };
+      const parentNode = storeNodes[node.parent_id];
+      const parentIsTrunk = !parentNode.branch_label && !parentNode.is_merge_node;
+      const thisIsBranch = node.branch_label !== null || node.is_merge_node;
+      const forkEdge = parentIsTrunk && thisIsBranch;
 
       flowEdges.push({
         id: `e-${node.parent_id}-${node.node_id}`,
         source: node.parent_id,
         target: node.node_id,
+        sourceHandle: forkEdge ? 'right' : 'bottom',
+        targetHandle: forkEdge ? 'left' : 'top',
+        type: 'smoothstep',
         animated: false,
-        style: edgeStyle,
+        style: thisIsBranch
+          ? { stroke: '#7c3aed', strokeWidth: 1.5, strokeDasharray: '6 3', opacity: 0.7 }
+          : { stroke: '#2DD4BF', strokeWidth: 1.5, opacity: 0.35 },
       });
     }
 
-    // For merge nodes, also add edge from merge_parent_id
-    if (node.is_merge_node && node.merge_parent_id && storeNodes[node.merge_parent_id] && !storeNodes[node.merge_parent_id].pruned) {
+    // Merge second-parent edge
+    if (
+      node.is_merge_node &&
+      node.merge_parent_id &&
+      storeNodes[node.merge_parent_id] &&
+      !storeNodes[node.merge_parent_id].pruned
+    ) {
       flowEdges.push({
         id: `e-merge-${node.merge_parent_id}-${node.node_id}`,
         source: node.merge_parent_id,
         target: node.node_id,
+        sourceHandle: 'bottom',
+        targetHandle: 'left',
+        type: 'smoothstep',
         animated: false,
-        style: { stroke: '#555', strokeWidth: 1, strokeDasharray: '5 3' },
+        style: { stroke: '#7c3aed', strokeWidth: 1.5, strokeDasharray: '6 3', opacity: 0.7 },
       });
     }
   }
