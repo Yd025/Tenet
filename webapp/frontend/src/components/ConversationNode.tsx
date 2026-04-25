@@ -75,17 +75,11 @@ export default function ConversationNodeComponent({ data }: NodeProps<Conversati
 
   return (
     <div style={{ position: 'relative' }}>
-      {/* React Flow handles (invisible) */}
-      <Handle
-        type="target"
-        position={Position.Top}
-        style={{ opacity: 0, width: 1, height: 1 }}
-      />
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        style={{ opacity: 0, width: 1, height: 1 }}
-      />
+      {/* React Flow handles */}
+      <Handle type="target" position={Position.Top}    id="top"    style={{ opacity: 0, width: 1, height: 1 }} />
+      <Handle type="source" position={Position.Bottom} id="bottom" style={{ opacity: 0, width: 1, height: 1 }} />
+      <Handle type="source" position={Position.Right}  id="right"  style={{ opacity: 0, width: 1, height: 1 }} />
+      <Handle type="target" position={Position.Left}   id="left"   style={{ opacity: 0, width: 1, height: 1 }} />
 
       {/* Node body */}
       <div
