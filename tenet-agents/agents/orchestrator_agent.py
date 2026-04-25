@@ -10,6 +10,52 @@ import asyncio
 import json
 import time
 
+MODEL_MAP = {
+    "deepseek": "deepseek-r1:latest",
+    "qwen": "qwen2.5:latest",
+}
+
+
+async def call_ollama(prompt: str, model: str, is_sensitive: bool) -> dict:
+    """Call Ollama REST API directly for local model inference.
+
+    Args:
+        prompt: The user prompt to send to the model.
+        model: Model key ("deepseek", "qwen") or a full Ollama model name.
+        is_sensitive: If True, forces use of deepseek-r1:latest for on-device privacy.
+
+    Returns:
+        dict with keys: response (str), tps (float), model_used (str)
+    """
+    if is_sensitive:
+        model_name = MODEL_MAP["deepseek"]
+    else:
+        model_name = MODEL_MAP.get(model, model)
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                "http://localhost:11434/api/generate",
+                json={
+                    "model": model_name,
+                    "prompt": prompt,
+                    "stream": False,
+                }
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        response_text = data.get("response", "")
+        eval_duration = data.get("eval_duration", 1)  # nanoseconds
+        eval_count = data.get("eval_count", 1)
+        tps = round(eval_count / (eval_duration / 1e9), 1) if eval_duration > 0 else 0.0
+
+        return {"response": response_text, "tps": tps, "model_used": model_name}
+
+    except Exception as e:
+        return {"response": f"Agent unavailable: {str(e)}", "tps": 0.0, "model_used": model_name}
+
+
 class TenetOrchestrator:
     """Main orchestrator agent - Routes requests to specialist agents"""
     
@@ -147,38 +193,31 @@ class TenetOrchestrator:
             return {"level": PrivacyLevel.PUBLIC, "confidence": 1.0}
     
     async def route_to_local_model(self, msg: ChatRequest) -> dict:
-        """Route request to local model on ASUS hardware"""
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.HARDWARE_API_URL}/generate",
-                    json={
-                        "prompt": msg.prompt,
-                        "conversation_id": msg.conversation_id,
-                        "branch_id": msg.branch_id,
-                        "model": self.config.DEFAULT_LOCAL_MODEL
-                    },
-                    timeout=self.config.LOCAL_TIMEOUT
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "response": result.get("response", "Local model response"),
-                    "model_used": result.get("model", self.config.DEFAULT_LOCAL_MODEL),
-                    "execution_location": ExecutionLocation.LOCAL,
-                    "conversation_id": msg.conversation_id,
-                    "branch_id": msg.branch_id,
-                    "metadata": {
-                        "privacy": "local-execution",
-                        "hardware_accelerated": True
-                    }
-                }
-                
-        except Exception as e:
-            print(f"Local model failed: {e}, falling back to cloud")
+        """Route request to local Ollama model for sensitive/private data.
+
+        Uses call_ollama() which POSTs to http://localhost:11434/api/generate.
+        Sensitive requests are always routed to deepseek-r1:latest.
+        Falls back to cloud if Ollama is unavailable.
+        """
+        is_sensitive = (msg.privacy_level == PrivacyLevel.SENSITIVE)
+        model_key = getattr(msg, "model", self.config.DEFAULT_LOCAL_MODEL)
+        ollama_result = await call_ollama(msg.prompt, model_key, is_sensitive)
+
+        if ollama_result["response"].startswith("Agent unavailable:"):
+            print(f"Ollama unavailable: {ollama_result['response']}, falling back to cloud")
             return await self.route_to_cloud_model(msg)
+
+        return {
+            "response": ollama_result["response"],
+            "model_used": ollama_result["model_used"],
+            "execution_location": ExecutionLocation.LOCAL,
+            "conversation_id": msg.conversation_id,
+            "branch_id": msg.branch_id,
+            "metadata": {
+                "privacy": "local-execution",
+                "tps": ollama_result["tps"],
+            }
+        }
     
     async def route_to_cloud_model(self, msg: ChatRequest) -> dict:
         """Route request to cloud API"""

@@ -1,3 +1,10 @@
+# Chat routing:
+# 1. FastAPI receives request
+# 2. For demo: calls Ollama directly (Step 10 implementation)
+# 3. Production: orchestrator_agent.py handles routing via uagents protocol
+#    The orchestrator applies privacy routing (deepseek for sensitive, qwen for general)
+#    and can be extended to route between local and cloud models
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import httpx
