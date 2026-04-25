@@ -79,17 +79,31 @@ export default function ConversationNodeComponent({ data }: NodeProps<Conversati
       <Handle
         type="target"
         position={Position.Top}
+        id="top"
+        style={{ opacity: 0, width: 1, height: 1 }}
+      />
+      <Handle
+        type="target"
+        position={Position.Left}
+        id="left"
         style={{ opacity: 0, width: 1, height: 1 }}
       />
       <Handle
         type="source"
         position={Position.Bottom}
+        id="bottom"
+        style={{ opacity: 0, width: 1, height: 1 }}
+      />
+      <Handle
+        type="source"
+        position={Position.Right}
+        id="right"
         style={{ opacity: 0, width: 1, height: 1 }}
       />
 
       {/* Node body */}
       <div
-        className="flex items-center gap-2 cursor-pointer select-none px-2 py-1 rounded hover:bg-white/5 transition-colors"
+        className="flex w-full items-start gap-3 cursor-pointer select-none rounded-md px-3 py-2 hover:bg-white/5 transition-colors"
         onClick={handleClick}
         onContextMenu={handleContextMenu}
       >
@@ -100,9 +114,9 @@ export default function ConversationNodeComponent({ data }: NodeProps<Conversati
         />
 
         {/* Labels */}
-        <div className="flex flex-col leading-tight">
-          <span className="text-white font-bold text-sm">{data.label}</span>
-          <span className="text-gray-500 text-xs">{data.sublabel}</span>
+        <div className="flex min-w-0 flex-1 flex-col leading-tight">
+          <span className="truncate text-white font-bold text-base">{data.label}</span>
+          <span className="mt-1 line-clamp-2 text-sm leading-snug text-gray-500">{data.sublabel}</span>
         </div>
       </div>
 

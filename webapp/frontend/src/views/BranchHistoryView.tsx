@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import ReactFlow, {
   Background,
   Controls,
+  Position,
   ReactFlowProvider,
 } from 'reactflow';
 import type { Node, Edge } from 'reactflow';
@@ -18,6 +19,30 @@ interface BranchHistoryViewProps {
 }
 
 const nodeTypes = { conversationNode: ConversationNodeComponent };
+const NODE_WIDTH = 260;
+const TRUNK_X = 260;
+const BRANCH_X = 680;
+const START_Y = 80;
+const ROW_GAP = 170;
+const BRANCH_ROW_GAP = 120;
+
+function getBranchLaneY(
+  node: ConversationNode,
+  fallbackY: number,
+  posMap: Record<string, { x: number; y: number }>,
+  branchCountsByParent: Record<string, number>,
+) {
+  const parentId = node.parent_id ?? 'root';
+  const siblingIndex = branchCountsByParent[parentId] ?? 0;
+  branchCountsByParent[parentId] = siblingIndex + 1;
+
+  const parentY = node.parent_id ? posMap[node.parent_id]?.y : undefined;
+  if (parentY === undefined) {
+    return fallbackY;
+  }
+
+  return parentY + siblingIndex * BRANCH_ROW_GAP;
+}
 
 // ---------------------------------------------------------------------------
 // Graph builder
@@ -70,21 +95,43 @@ function buildFlowGraph(
     }
   }
 
-  // Position assignment: simple top-down
-  let trunkY = 50;
-  let branchY = 50;
+  // Position assignment: keep the primary conversation and branches in
+  // separate lanes so labels have enough room to breathe.
+  let trunkY = START_Y;
+  let fallbackBranchY = START_Y;
 
   const posMap: Record<string, { x: number; y: number }> = {};
+  const branchCountsByParent: Record<string, number> = {};
 
   for (const node of sorted) {
     const isBranch = node.branch_label !== null;
     if (isBranch) {
-      posMap[node.node_id] = { x: 380, y: branchY };
-      branchY += 130;
+      const branchY = getBranchLaneY(node, fallbackBranchY, posMap, branchCountsByParent);
+      posMap[node.node_id] = { x: BRANCH_X, y: branchY };
+      fallbackBranchY = Math.max(fallbackBranchY + ROW_GAP, branchY + ROW_GAP);
     } else {
-      posMap[node.node_id] = { x: 200, y: trunkY };
-      trunkY += 130;
+      posMap[node.node_id] = { x: TRUNK_X, y: trunkY };
+      trunkY += ROW_GAP;
     }
+  }
+
+  const occupiedRows = new Set<string>();
+  for (const node of sorted) {
+    const pos = posMap[node.node_id];
+    const rowKey = `${pos.x}:${Math.round(pos.y / 20)}`;
+    if (!occupiedRows.has(rowKey)) {
+      occupiedRows.add(rowKey);
+      continue;
+    }
+
+    let nextY = pos.y + BRANCH_ROW_GAP;
+    let nextKey = `${pos.x}:${Math.round(nextY / 20)}`;
+    while (occupiedRows.has(nextKey)) {
+      nextY += BRANCH_ROW_GAP;
+      nextKey = `${pos.x}:${Math.round(nextY / 20)}`;
+    }
+    posMap[node.node_id] = { ...pos, y: nextY };
+    occupiedRows.add(nextKey);
   }
 
   // Build react-flow nodes
@@ -109,6 +156,9 @@ function buildFlowGraph(
       type: 'conversationNode',
       position: posMap[node.node_id] ?? { x: 200, y: 50 },
       data,
+      style: { width: NODE_WIDTH },
+      targetPosition: isBranch ? Position.Left : Position.Top,
+      sourcePosition: isBranch ? Position.Right : Position.Bottom,
     });
   }
 
@@ -120,11 +170,16 @@ function buildFlowGraph(
       const edgeStyle = isBranch
         ? { stroke: '#555', strokeWidth: 1, strokeDasharray: '5 3' }
         : { stroke: '#333', strokeWidth: 1 };
+      const sourcePos = posMap[node.parent_id];
+      const targetPos = posMap[node.node_id];
+      const isLateralEdge = sourcePos && targetPos && Math.abs(sourcePos.x - targetPos.x) > NODE_WIDTH;
 
       flowEdges.push({
         id: `e-${node.parent_id}-${node.node_id}`,
         source: node.parent_id,
         target: node.node_id,
+        sourceHandle: isLateralEdge ? 'right' : 'bottom',
+        targetHandle: isLateralEdge ? 'left' : 'top',
         animated: false,
         style: edgeStyle,
       });
@@ -136,6 +191,8 @@ function buildFlowGraph(
         id: `e-merge-${node.merge_parent_id}-${node.node_id}`,
         source: node.merge_parent_id,
         target: node.node_id,
+        sourceHandle: 'right',
+        targetHandle: 'left',
         animated: false,
         style: { stroke: '#555', strokeWidth: 1, strokeDasharray: '5 3' },
       });
@@ -214,6 +271,7 @@ function BranchHistoryInner({ setActiveTab }: BranchHistoryViewProps) {
           nodeTypes={nodeTypes}
           nodesDraggable={false}
           fitView
+          fitViewOptions={{ padding: 0.2 }}
         >
           <Background color="#1e1e24" gap={20} />
           <Controls />
