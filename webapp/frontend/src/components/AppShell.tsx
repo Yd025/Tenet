@@ -4,20 +4,7 @@ import { useConversationStore } from '../store/useConversationStore';
 import Sidebar from './Sidebar';
 import TopNav from './TopNav';
 import ChatView from '../views/ChatView';
-
-function BranchHistoryView({ setActiveTab }: { setActiveTab: (tab: 'chats' | 'branch-history') => void }) {
-  return (
-    <div className="flex-1 flex flex-col items-center justify-center bg-tenet-bg gap-3">
-      <span className="text-gray-500 text-sm">Branch History View</span>
-      <button
-        onClick={() => setActiveTab('chats')}
-        className="text-xs text-tenet-teal underline"
-      >
-        Back to Chats
-      </button>
-    </div>
-  );
-}
+import BranchHistoryView from '../views/BranchHistoryView';
 
 export default function AppShell() {
   const { conversationId } = useParams<{ conversationId: string }>();

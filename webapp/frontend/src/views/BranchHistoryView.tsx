@@ -1,0 +1,266 @@
+import { useCallback } from 'react';
+import ReactFlow, {
+  Background,
+  Controls,
+  ReactFlowProvider,
+} from 'reactflow';
+import type { Node, Edge } from 'reactflow';
+import 'reactflow/dist/style.css';
+
+import { useConversationStore } from '../store/useConversationStore';
+import { fetchMerge } from '../api/client';
+import type { ConversationNode } from '../types';
+import ConversationNodeComponent from '../components/ConversationNode';
+import type { ConversationNodeData } from '../components/ConversationNode';
+
+interface BranchHistoryViewProps {
+  setActiveTab: (tab: 'chats' | 'branch-history') => void;
+}
+
+const nodeTypes = { conversationNode: ConversationNodeComponent };
+
+// ---------------------------------------------------------------------------
+// Graph builder
+// ---------------------------------------------------------------------------
+function buildFlowGraph(
+  storeNodes: Record<string, ConversationNode>,
+  headNodeId: string | null,
+  selectedNodeIds: string[],
+  handlers: {
+    onCheckout: (id: string) => void;
+    onBranch: (id: string) => void;
+    onPrune: (id: string) => void;
+    onSelect: (id: string) => void;
+  },
+): { nodes: Node[]; edges: Edge[] } {
+  const flowNodes: Node[] = [];
+  const flowEdges: Edge[] = [];
+
+  // Filter out pruned nodes
+  const activeNodes = Object.values(storeNodes).filter((n) => !n.pruned);
+
+  // Sort by timestamp for stable ordering
+  const sorted = [...activeNodes].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+  );
+
+  // Assign labels: count main trunk vs branch nodes
+  let trunkCount = 0;
+  let branchCount = 0;
+  const labelMap: Record<string, string> = {};
+  const sublabelMap: Record<string, string> = {};
+
+  for (const node of sorted) {
+    if (node.branch_label) {
+      branchCount += 1;
+      // Find parent label for context
+      const parentLabel = node.parent_id ? labelMap[node.parent_id] ?? '?' : '?';
+      labelMap[node.node_id] = `b${branchCount}/${parentLabel}`;
+      sublabelMap[node.node_id] = node.branch_label;
+    } else if (node.is_merge_node) {
+      // Merge nodes get a trunk label
+      trunkCount += 1;
+      labelMap[node.node_id] = `v${trunkCount}`;
+      sublabelMap[node.node_id] = 'Merge';
+    } else {
+      trunkCount += 1;
+      labelMap[node.node_id] = `v${trunkCount}`;
+      // Use first 40 chars of prompt as sublabel
+      sublabelMap[node.node_id] = node.prompt.slice(0, 40) || 'Node';
+    }
+  }
+
+  // Position assignment: simple top-down
+  let trunkY = 50;
+  let branchY = 50;
+
+  const posMap: Record<string, { x: number; y: number }> = {};
+
+  for (const node of sorted) {
+    const isBranch = node.branch_label !== null;
+    if (isBranch) {
+      posMap[node.node_id] = { x: 380, y: branchY };
+      branchY += 130;
+    } else {
+      posMap[node.node_id] = { x: 200, y: trunkY };
+      trunkY += 130;
+    }
+  }
+
+  // Build react-flow nodes
+  for (const node of sorted) {
+    const isBranch = node.branch_label !== null;
+    const isHead = node.node_id === headNodeId;
+    const isSelected = selectedNodeIds.includes(node.node_id);
+
+    const data: ConversationNodeData = {
+      label: labelMap[node.node_id] ?? node.node_id.slice(0, 8),
+      sublabel: sublabelMap[node.node_id] ?? '',
+      isHead,
+      isBranch,
+      isMerge: node.is_merge_node,
+      isSelected,
+      nodeId: node.node_id,
+      ...handlers,
+    };
+
+    flowNodes.push({
+      id: node.node_id,
+      type: 'conversationNode',
+      position: posMap[node.node_id] ?? { x: 200, y: 50 },
+      data,
+    });
+  }
+
+  // Build edges
+  for (const node of sorted) {
+    const isBranch = node.branch_label !== null || node.is_merge_node;
+
+    if (node.parent_id && storeNodes[node.parent_id] && !storeNodes[node.parent_id].pruned) {
+      const edgeStyle = isBranch
+        ? { stroke: '#555', strokeWidth: 1, strokeDasharray: '5 3' }
+        : { stroke: '#333', strokeWidth: 1 };
+
+      flowEdges.push({
+        id: `e-${node.parent_id}-${node.node_id}`,
+        source: node.parent_id,
+        target: node.node_id,
+        animated: false,
+        style: edgeStyle,
+      });
+    }
+
+    // For merge nodes, also add edge from merge_parent_id
+    if (node.is_merge_node && node.merge_parent_id && storeNodes[node.merge_parent_id] && !storeNodes[node.merge_parent_id].pruned) {
+      flowEdges.push({
+        id: `e-merge-${node.merge_parent_id}-${node.node_id}`,
+        source: node.merge_parent_id,
+        target: node.node_id,
+        animated: false,
+        style: { stroke: '#555', strokeWidth: 1, strokeDasharray: '5 3' },
+      });
+    }
+  }
+
+  return { nodes: flowNodes, edges: flowEdges };
+}
+
+// ---------------------------------------------------------------------------
+// Inner component (needs ReactFlowProvider context)
+// ---------------------------------------------------------------------------
+function BranchHistoryInner({ setActiveTab }: BranchHistoryViewProps) {
+  const storeNodes = useConversationStore((s) => s.nodes);
+  const headNodeId = useConversationStore((s) => s.headNodeId);
+  const selectedNodeIds = useConversationStore((s) => s.selectedNodeIds);
+  const checkoutNode = useConversationStore((s) => s.checkoutNode);
+  const branchFromNode = useConversationStore((s) => s.branchFromNode);
+  const pruneNode = useConversationStore((s) => s.pruneNode);
+  const selectNodeForMerge = useConversationStore((s) => s.selectNodeForMerge);
+  const mergeNodes = useConversationStore((s) => s.mergeNodes);
+  const clearMergeSelection = useConversationStore((s) => s.clearMergeSelection);
+
+  const handlers = {
+    onCheckout: useCallback((id: string) => checkoutNode(id), [checkoutNode]),
+    onBranch: useCallback(
+      (id: string) => branchFromNode(id, 'New Branch'),
+      [branchFromNode],
+    ),
+    onPrune: useCallback((id: string) => pruneNode(id), [pruneNode]),
+    onSelect: useCallback((id: string) => selectNodeForMerge(id), [selectNodeForMerge]),
+  };
+
+  const { nodes: builtNodes, edges: builtEdges } = buildFlowGraph(
+    storeNodes,
+    headNodeId,
+    selectedNodeIds,
+    handlers,
+  );
+
+  // Floating action bar handlers
+  async function handleMerge() {
+    if (selectedNodeIds.length !== 2) return;
+    const [a, b] = selectedNodeIds;
+    try {
+      const result = await fetchMerge({ node_id_a: a, node_id_b: b });
+      mergeNodes(a, b, result.response);
+    } catch (err) {
+      console.error('Merge failed:', err);
+    }
+  }
+
+  function handleBranchFromSelected() {
+    if (selectedNodeIds.length !== 1) return;
+    branchFromNode(selectedNodeIds[0], 'New Branch');
+    clearMergeSelection();
+  }
+
+  return (
+    <div className="flex-1 flex flex-col relative" style={{ background: '#0B0B0C' }}>
+      {/* Back button */}
+      <div className="absolute top-3 left-3 z-10">
+        <button
+          onClick={() => setActiveTab('chats')}
+          className="text-xs text-tenet-teal underline hover:opacity-80 transition-opacity"
+        >
+          ← Back to Chats
+        </button>
+      </div>
+
+      {/* React Flow canvas */}
+      <div className="flex-1">
+        <ReactFlow
+          nodes={builtNodes}
+          edges={builtEdges}
+          nodeTypes={nodeTypes}
+          nodesDraggable={false}
+          fitView
+        >
+          <Background color="#1e1e24" gap={20} />
+          <Controls />
+        </ReactFlow>
+      </div>
+
+      {/* Floating action bar */}
+      {selectedNodeIds.length >= 1 && (
+        <div
+          className="absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-3 items-center bg-tenet-surface border border-tenet-border rounded-lg px-4 py-2 shadow-xl z-20"
+          style={{ boxShadow: '0 4px 24px rgba(0,0,0,0.7)' }}
+        >
+          {selectedNodeIds.length === 2 && (
+            <button
+              onClick={handleMerge}
+              className="px-4 py-1.5 rounded bg-tenet-teal text-black font-semibold text-sm hover:opacity-90 transition-opacity"
+            >
+              Merge (Select 2)
+            </button>
+          )}
+          {selectedNodeIds.length === 1 && (
+            <button
+              onClick={handleBranchFromSelected}
+              className="px-4 py-1.5 rounded bg-tenet-purple text-white font-semibold text-sm hover:opacity-90 transition-opacity"
+            >
+              ⎇ Branch from Here
+            </button>
+          )}
+          <button
+            onClick={clearMergeSelection}
+            className="text-gray-400 text-xs hover:text-white transition-colors"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Exported component (wrapped in ReactFlowProvider)
+// ---------------------------------------------------------------------------
+export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewProps) {
+  return (
+    <ReactFlowProvider>
+      <BranchHistoryInner setActiveTab={setActiveTab} />
+    </ReactFlowProvider>
+  );
+}
