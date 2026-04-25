@@ -1,9 +1,14 @@
-function App() {
-  return (
-    <div className="min-h-screen bg-tenet-bg text-white flex items-center justify-center">
-      <h1 className="text-tenet-teal text-4xl font-bold">Tenet</h1>
-    </div>
-  )
-}
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import LandingView from './views/LandingView';
+import AppShell from './components/AppShell';
 
-export default App
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<LandingView />} />
+        <Route path="/c/:conversationId" element={<AppShell />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
