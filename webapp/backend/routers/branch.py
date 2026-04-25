@@ -44,7 +44,7 @@ async def merge_branches(req: MergeRequest):
             resp = await client.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={
-                    "model": MODEL_MAP["deepseek"],
+                    "model": MODEL_MAP.get("gemma4", MODEL_MAP["deepseek"]),
                     "prompt": synthesis_prompt,
                     "stream": False,
                 }
@@ -67,4 +67,4 @@ async def prune_node(node_id: str):
 
 @router.get("/models")
 async def get_models():
-    return ["deepseek", "qwen"]
+    return ["gemma4", "deepseek", "qwen"]

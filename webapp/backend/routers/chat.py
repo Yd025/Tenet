@@ -11,7 +11,7 @@ import httpx
 
 router = APIRouter()
 
-OLLAMA_URL = "http://localhost:11434"
+OLLAMA_URL = "http://100.127.248.116:11434"
 
 class ChatRequest(BaseModel):
     prompt: str
@@ -30,6 +30,7 @@ class ChatResponse(BaseModel):
 MODEL_MAP = {
     "deepseek": "deepseek-r1:latest",
     "qwen": "qwen2.5:latest",
+    "gemma4": "gemma4",
 }
 
 @router.post("/chat", response_model=ChatResponse)
@@ -52,7 +53,7 @@ async def chat(req: ChatRequest):
             resp.raise_for_status()
             data = resp.json()
     except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Ollama not running at localhost:11434")
+        raise HTTPException(status_code=503, detail=f"Ollama not reachable at {OLLAMA_URL}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

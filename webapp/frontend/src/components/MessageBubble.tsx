@@ -6,7 +6,12 @@ interface MessageBubbleProps {
 }
 
 export default function MessageBubble({ node, isHead }: MessageBubbleProps) {
-  const modelLabel = node.model_used === 'deepseek' ? 'DeepSeek R1 • local' : 'Qwen 2.5 • local';
+  const modelLabels: Record<string, string> = {
+    gemma4: 'Gemma 4 • local',
+    deepseek: 'DeepSeek R1 • local',
+    qwen: 'Qwen 2.5 • local',
+  };
+  const modelLabel = modelLabels[node.model_used] ?? `${node.model_used} • local`;
 
   // Skip nodes that are empty branch stubs (no prompt yet)
   if (!node.prompt && !node.response) return null;

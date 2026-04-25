@@ -11,7 +11,7 @@ export default function AppShell() {
   const setActiveConversation = useConversationStore((s) => s.setActiveConversation);
 
   const [activeTab, setActiveTab] = useState<'chats' | 'branch-history'>('chats');
-  const [selectedModel, setSelectedModel] = useState('deepseek');
+  const [selectedModel, setSelectedModel] = useState('gemma4');
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   useEffect(() => {
