@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { GitBranch, Menu } from 'lucide-react';
 import { useConversationStore } from '../store/useConversationStore';
@@ -9,6 +9,12 @@ export default function LandingView() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const navigate = useNavigate();
   const startConversation = useConversationStore((s) => s.startConversation);
+  const setActiveConversation = useConversationStore((s) => s.setActiveConversation);
+
+  // Clear any stale active conversation so the sidebar doesn't highlight one
+  useEffect(() => {
+    setActiveConversation(null);
+  }, [setActiveConversation]);
 
   const handleSubmit = () => {
     if (!inputValue.trim()) return;
