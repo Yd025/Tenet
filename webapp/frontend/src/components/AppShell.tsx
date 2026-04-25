@@ -30,8 +30,8 @@ export default function AppShell() {
         <Sidebar onClose={() => setSidebarOpen(false)} />
       </div>
 
-      {/* Right: main panel */}
-      <div className="flex-1 flex flex-col min-w-0">
+      {/* Right: main panel — min-h-0 allows nested scroll containers to shrink */}
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
         <TopNav
           activeTab={activeTab}
           setActiveTab={setActiveTab}
