@@ -1,12 +1,20 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { GitBranch } from 'lucide-react';
+import { GitBranch, Menu } from 'lucide-react';
 import { useConversationStore } from '../store/useConversationStore';
+import Sidebar from '../components/Sidebar';
 
 export default function LandingView() {
   const [inputValue, setInputValue] = useState('');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const navigate = useNavigate();
   const startConversation = useConversationStore((s) => s.startConversation);
+  const setActiveConversation = useConversationStore((s) => s.setActiveConversation);
+
+  // Clear any stale active conversation so the sidebar doesn't highlight one
+  useEffect(() => {
+    setActiveConversation(null);
+  }, [setActiveConversation]);
 
   const handleSubmit = () => {
     if (!inputValue.trim()) return;
@@ -20,8 +28,28 @@ export default function LandingView() {
   };
 
   return (
-    <div className="min-h-screen bg-tenet-bg flex flex-col items-center justify-center px-4">
-      <div className="flex flex-col items-center gap-3 w-full max-w-2xl">
+    <div className="min-h-screen bg-tenet-bg flex overflow-hidden">
+      {/* Sidebar drawer */}
+      <div
+        className="flex-shrink-0 transition-all duration-200 overflow-hidden"
+        style={{ width: sidebarOpen ? 240 : 0 }}
+      >
+        <Sidebar onClose={() => setSidebarOpen(false)} />
+      </div>
+
+      {/* Main centered content */}
+      <div className="flex-1 flex flex-col items-center justify-center px-4 relative">
+        {/* Hamburger button */}
+        {!sidebarOpen && (
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="absolute top-4 left-4 text-gray-500 hover:text-white transition-colors p-2 rounded hover:bg-white/5"
+          >
+            <Menu size={20} />
+          </button>
+        )}
+
+        <div className="flex flex-col items-center gap-3 w-full max-w-2xl">
         {/* Logo */}
         <h1 className="text-tenet-teal text-4xl font-bold tracking-widest">TENET</h1>
 
@@ -51,6 +79,7 @@ export default function LandingView() {
         <p className="text-xs text-gray-600">
           Type '/' for quick commands or select a template
         </p>
+      </div>
       </div>
     </div>
   );

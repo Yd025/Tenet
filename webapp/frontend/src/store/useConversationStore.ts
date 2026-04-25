@@ -26,7 +26,7 @@ interface ConversationStore {
   ) => void;
   selectNodeForMerge: (nodeId: string) => void;
   clearMergeSelection: () => void;
-  setActiveConversation: (id: string) => void;
+  setActiveConversation: (id: string | null) => void;
   getThreadToHead: () => ConversationNode[];
 }
 
@@ -360,7 +360,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     set({ selectedNodeIds: [] });
   },
 
-  setActiveConversation: (id: string) => {
+  setActiveConversation: (id: string | null) => {
     set({ activeConversationId: id });
   },
 
