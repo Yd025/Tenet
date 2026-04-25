@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useConversationStore } from '../store/useConversationStore';
 import { fetchChat } from '../api/client';
-import type { ModelId } from '../types';
+import type { ModelId, ConversationNode } from '../types';
 import MessageBubble from '../components/MessageBubble';
 import CommitInputBar from '../components/CommitInputBar';
 

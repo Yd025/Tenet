@@ -1,20 +1,28 @@
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from typing import Optional, List, Dict, Any
 import uuid
 
-# This is what the Frontend sends to you
 class ChatRequest(BaseModel):
     prompt: str
-    parent_id: Optional[str] = None
+    parent_id: Optional[str] = None  # Frontend sends the "current" node
     root_id: str
     model: str
-    is_sensitive: bool
+    is_sensitive: bool = False
 
-# This is what you save to MongoDB
-class MessageNode(BaseModel):
+class Node(BaseModel):
     node_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    parent_id: Optional[str] = None
+    parent_ids: List[str] = []  # Supports multiple parents for merges
     root_id: str
-    role: str
-    content: str
+    prompt: str
+    response: str
     metadata: Dict[str, Any] = {}
+
+class MergeRequest(BaseModel):
+    node_ids: List[str]  # Merge 2 or more nodes
+    root_id: str
+    model: str = "qwen3.6:latest"
+
+class RootMergeRequest(BaseModel):
+    root_ids: List[str]  # Merge two entire project trees
+    new_root_name: str
+    model: str = "qwen3.6:latest"

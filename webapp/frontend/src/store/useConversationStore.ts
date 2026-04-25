@@ -43,8 +43,10 @@ const seedNodes: Record<string, ConversationNode> = {
   [SEED_V1_ID]: {
     node_id: SEED_V1_ID,
     conversation_id: SEED_CONV_ID,
+    root_id: SEED_CONV_ID,
     parent_id: null,
     merge_parent_id: null,
+    parent_ids: [],
     children_ids: [SEED_V2_ID],
     prompt:
       "I have a phone screening for a senior software engineer role at a mid-size fintech startup tomorrow. The job description emphasizes distributed systems, Python, and API design. Can you help me set the context so we can prep effectively?",
@@ -61,8 +63,10 @@ const seedNodes: Record<string, ConversationNode> = {
   [SEED_V2_ID]: {
     node_id: SEED_V2_ID,
     conversation_id: SEED_CONV_ID,
+    root_id: SEED_CONV_ID,
     parent_id: SEED_V1_ID,
     merge_parent_id: null,
+    parent_ids: [SEED_V1_ID],
     children_ids: [SEED_V3_ID, SEED_B1_ID],
     prompt:
       "Let's focus on the technical side first. What Python and distributed systems questions should I expect, and how should I frame my answers?",
@@ -79,8 +83,10 @@ const seedNodes: Record<string, ConversationNode> = {
   [SEED_V3_ID]: {
     node_id: SEED_V3_ID,
     conversation_id: SEED_CONV_ID,
+    root_id: SEED_CONV_ID,
     parent_id: SEED_V2_ID,
     merge_parent_id: null,
+    parent_ids: [SEED_V2_ID],
     children_ids: [],
     prompt:
       "Now give me 3 system design questions they're likely to ask and concise talking points for each.",
@@ -97,8 +103,10 @@ const seedNodes: Record<string, ConversationNode> = {
   [SEED_B1_ID]: {
     node_id: SEED_B1_ID,
     conversation_id: SEED_CONV_ID,
+    root_id: SEED_CONV_ID,
     parent_id: SEED_V2_ID,
     merge_parent_id: null,
+    parent_ids: [SEED_V2_ID],
     children_ids: [],
     prompt:
       "Actually, let me take a different angle — what behavioral questions should I prep for instead?",
@@ -180,8 +188,10 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       const newNode: ConversationNode = {
         node_id: nodeId,
         conversation_id: activeConversationId,
+        root_id: activeConversationId,
         parent_id: headNodeId,
         merge_parent_id: null,
+        parent_ids: headNodeId ? [headNodeId] : [],
         children_ids: [],
         prompt,
         response,
@@ -233,8 +243,10 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     const newNode: ConversationNode = {
       node_id: newNodeId,
       conversation_id: activeConversationId,
+      root_id: activeConversationId,
       parent_id: nodeId,
       merge_parent_id: null,
+      parent_ids: [nodeId],
       children_ids: [],
       prompt: '',
       response: '',
@@ -305,8 +317,10 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     const mergeNode: ConversationNode = {
       node_id: mergeNodeId,
       conversation_id: activeConversationId,
+      root_id: activeConversationId,
       parent_id: nodeIdA,
       merge_parent_id: nodeIdB,
+      parent_ids: [nodeIdA, nodeIdB],
       children_ids: [],
       prompt: `[Merge of ${nodeIdA} and ${nodeIdB}]`,
       response: synthesisResponse,
