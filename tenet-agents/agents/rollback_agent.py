@@ -14,6 +14,8 @@ class TenetRollbackAgent:
             name="tenet-rollback-agent",
             seed="tenet_rollback_seed_2024_secure",
             port=8013,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.config = config
         self.setup_handlers()

@@ -32,6 +32,8 @@ class TenetGraphIntegrityAgent:
             name="tenet-graph-integrity",
             seed="tenet_graph_integrity_seed_2024_secure",
             port=8018,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.config = config
         self.setup_handlers()

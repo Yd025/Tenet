@@ -32,6 +32,8 @@ class TenetStorageOptimizerAgent:
             name="tenet-storage-optimizer",
             seed="tenet_storage_optimizer_seed_2024_secure",
             port=8016,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.config = config
         self.setup_handlers()

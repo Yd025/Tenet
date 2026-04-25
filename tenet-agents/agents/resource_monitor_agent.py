@@ -34,6 +34,8 @@ class TenetResourceMonitorAgent:
             name="tenet-resource-monitor",
             seed="tenet_resource_monitor_seed_2024_secure",
             port=8017,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.config = config
         self.setup_handlers()
