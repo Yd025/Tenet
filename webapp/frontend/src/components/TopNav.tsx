@@ -28,10 +28,8 @@ export default function TopNav({
 }: TopNavProps) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
 
-  const { activeConversationId, conversations } = useConversationStore((s) => ({
-    activeConversationId: s.activeConversationId,
-    conversations: s.conversations,
-  }));
+  const activeConversationId = useConversationStore((s) => s.activeConversationId);
+  const conversations = useConversationStore((s) => s.conversations);
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId);
   const conversationTitle = activeConversation?.title ?? 'Untitled';

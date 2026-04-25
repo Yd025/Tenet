@@ -9,10 +9,8 @@ interface SidebarProps {
 
 export default function Sidebar({ onClose }: SidebarProps) {
   const navigate = useNavigate();
-  const { conversations, activeConversationId } = useConversationStore((s) => ({
-    conversations: s.conversations,
-    activeConversationId: s.activeConversationId,
-  }));
+  const conversations = useConversationStore((s) => s.conversations);
+  const activeConversationId = useConversationStore((s) => s.activeConversationId);
 
   const handleNewChat = () => {
     navigate('/');
