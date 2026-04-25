@@ -1,31 +1,12 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useConversationStore } from '../store/useConversationStore';
-// import { fetchChat } from '../api/client';  // TODO: re-enable when Ollama is running
+import { fetchChat } from '../api/client';
 import type { ModelId } from '../types';
 import MessageBubble from '../components/MessageBubble';
 import CommitInputBar from '../components/CommitInputBar';
 
 interface ChatViewProps {
   selectedModel: string;
-}
-
-// ---------------------------------------------------------------------------
-// Mock response — replace with fetchChat() when backend is ready
-// ---------------------------------------------------------------------------
-async function mockFetchChat(params: {
-  prompt: string;
-  model: string;
-  is_sensitive: boolean;
-}): Promise<{ response: string; node_id: string; model_used: ModelId; tps: number }> {
-  // Simulate a short network delay
-  await new Promise((res) => setTimeout(res, 400));
-  const modelUsed: ModelId = (params.is_sensitive ? 'deepseek' : params.model) as ModelId;
-  return {
-    response: `[Mock ${modelUsed}] You asked: "${params.prompt}"\n\nThis is a placeholder response. Connect Ollama (ollama serve) and uncomment fetchChat() in ChatView.tsx to get real responses.`,
-    node_id: crypto.randomUUID(),
-    model_used: modelUsed,
-    tps: 42.0,
-  };
 }
 
 export default function ChatView({ selectedModel }: ChatViewProps) {
@@ -61,17 +42,13 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
     setIsLoading(true);
     setError(null);
     try {
-      // --- LIVE (uncomment when Ollama is running) ---
-      // const result = await fetchChat({
-      //   prompt,
-      //   conversation_id: activeConversationId,
-      //   branch_id: headNodeId ?? '',
-      //   model: selectedModel as ModelId,
-      //   is_sensitive: isSensitive,
-      // });
-
-      // --- MOCK (comment out when using live backend) ---
-      const result = await mockFetchChat({ prompt, model: selectedModel, is_sensitive: isSensitive });
+      const result = await fetchChat({
+        prompt,
+        conversation_id: activeConversationId,
+        branch_id: headNodeId ?? '',
+        model: selectedModel as ModelId,
+        is_sensitive: isSensitive,
+      });
 
       commitMessage(prompt, result.response, result.model_used, isSensitive);
     } catch (err) {
