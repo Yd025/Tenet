@@ -2,17 +2,124 @@ import type { ModelId, TelemetryStats } from '../types/index.js';
 
 const API_BASE = '/api';
 
-// Helper function to handle API errors
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    throw new Error(
-      `API error: ${response.status} ${response.statusText}`
-    );
+    throw new Error(`API error: ${response.status} ${response.statusText}`);
   }
   return response.json();
 }
 
-// POST /api/chat
+// ---------------------------------------------------------------------------
+// Telemetry
+// ---------------------------------------------------------------------------
+
+// GET /telemetry
+export async function fetchTelemetry(): Promise<TelemetryStats> {
+  const response = await fetch(`${API_BASE}/telemetry`);
+  return handleResponse(response);
+}
+
+// ---------------------------------------------------------------------------
+// Streaming chat (SSE)
+// ---------------------------------------------------------------------------
+
+export interface StreamChatParams {
+  prompt: string;
+  parent_id: string | null;
+  root_id: string;
+  model: ModelId;
+}
+
+export interface StreamChunk {
+  token: string;
+  tps: number;
+  node_id?: string;
+}
+
+// POST /chat/stream — returns an async generator of chunks, plus an abort fn.
+export function streamChat(
+  params: StreamChatParams,
+  signal: AbortSignal,
+  onChunk: (chunk: StreamChunk) => void,
+): Promise<void> {
+  return fetch(`${API_BASE}/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+    signal,
+  }).then(async (response) => {
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status} ${response.statusText}`);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('No response body');
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const json = trimmed.slice(5).trim();
+        if (!json || json === '[DONE]') continue;
+        try {
+          onChunk(JSON.parse(json) as StreamChunk);
+        } catch {
+          // ignore malformed SSE lines
+        }
+      }
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Node merge (intra-root)
+// ---------------------------------------------------------------------------
+
+// POST /merge/nodes
+export async function fetchMergeNodes(params: {
+  node_ids: string[];
+  root_id: string;
+  model: ModelId;
+}): Promise<{ node_id: string; response: string }> {
+  const response = await fetch(`${API_BASE}/merge/nodes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  return handleResponse(response);
+}
+
+// ---------------------------------------------------------------------------
+// Root merge (workspace synthesis)
+// ---------------------------------------------------------------------------
+
+// POST /merge/roots
+export async function fetchMergeRoots(params: {
+  root_ids: string[];
+  new_root_name: string;
+}): Promise<{ root_id: string; node_id: string; response: string }> {
+  const response = await fetch(`${API_BASE}/merge/roots`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  return handleResponse(response);
+}
+
+// ---------------------------------------------------------------------------
+// Legacy / compatibility shims
+// ---------------------------------------------------------------------------
+
+// fetchChat — non-streaming fallback used by ChatView until streaming is wired
 export async function fetchChat(params: {
   prompt: string;
   conversation_id: string;
@@ -28,20 +135,7 @@ export async function fetchChat(params: {
   return handleResponse(response);
 }
 
-// POST /api/branch
-export async function fetchBranch(params: {
-  node_id: string;
-  label: string;
-}): Promise<{ branch_id: string }> {
-  const response = await fetch(`${API_BASE}/branch`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-  return handleResponse(response);
-}
-
-// POST /api/merge
+// POST /api/merge (legacy two-node merge — kept for BranchHistoryView compat)
 export async function fetchMerge(params: {
   node_id_a: string;
   node_id_b: string;
@@ -51,24 +145,6 @@ export async function fetchMerge(params: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   });
-  return handleResponse(response);
-}
-
-// DELETE /api/node/:node_id
-export async function fetchPrune(node_id: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/node/${node_id}`, {
-    method: 'DELETE',
-  });
-  if (!response.ok) {
-    throw new Error(
-      `API error: ${response.status} ${response.statusText}`
-    );
-  }
-}
-
-// GET /api/telemetry
-export async function fetchTelemetry(): Promise<TelemetryStats> {
-  const response = await fetch(`${API_BASE}/telemetry`);
   return handleResponse(response);
 }
 
