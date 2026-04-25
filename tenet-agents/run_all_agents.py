@@ -39,6 +39,42 @@ AGENTS = [
         "script": "agents/context_keeper_agent.py",
         "port": 8005,
         "color": "🧠"
+    },
+    {
+        "name": "Branch Summarizer",
+        "script": "agents/branch_summarizer_agent.py",
+        "port": 8006,
+        "color": "📝"
+    },
+    {
+        "name": "Branch Merger",
+        "script": "agents/branch_merger_agent.py",
+        "port": 8007,
+        "color": "🔀"
+    },
+    {
+        "name": "Branch Pruner",
+        "script": "agents/branch_pruner_agent.py",
+        "port": 8008,
+        "color": "✂️"
+    },
+    {
+        "name": "Node Pruner",
+        "script": "agents/node_pruner_agent.py",
+        "port": 8009,
+        "color": "🔪"
+    },
+    {
+        "name": "Semantic Search",
+        "script": "agents/semantic_search_agent.py",
+        "port": 8010,
+        "color": "🔍"
+    },
+    {
+        "name": "Conversation Exporter",
+        "script": "agents/conversation_exporter_agent.py",
+        "port": 8011,
+        "color": "📤"
     }
 ]
 

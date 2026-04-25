@@ -3,10 +3,8 @@ from protocols.merge_protocol import (
     MergeRequest, MergeResponse, MergeConflict, merge_protocol, MergeStrategy
 )
 from config.agent_config import AgentConfig
-import httpx
-import json
 import uuid
-import time
+from utils.local_runtime import dag_store
 
 class TenetBranchMerger:
     """Merges branches intelligently"""
@@ -82,7 +80,7 @@ class TenetBranchMerger:
             )
             
             merged_branch_id = await self.create_merged_branch(
-                msg.conversation_id, target_branch, resolved_nodes, msg.user_id
+                msg.conversation_id, source_branch, target_branch, resolved_nodes, msg.user_id
             )
             
             summary = self.generate_merge_summary(source_branch, target_branch, conflicts)
@@ -107,13 +105,7 @@ class TenetBranchMerger:
 
     async def get_branch(self, branch_id: str) -> dict:
         """Get branch data from backend"""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.config.BACKEND_API_URL}/api/branches/{branch_id}",
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        return dag_store.get_branch(branch_id) or {}
 
     async def detect_conflicts(self, source_branch: dict, target_branch: dict) -> list:
         """Detect conflicts between branches"""
@@ -170,39 +162,14 @@ class TenetBranchMerger:
 
     async def merge_node_content(self, source_node: dict, target_node: dict) -> dict:
         """Intelligently merge content from two nodes"""
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.config.OPENAI_API_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "gpt-3.5-turbo",
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": "You are an expert at merging conflicting content. Create a unified response that incorporates the best elements from both versions."
-                            },
-                            {
-                                "role": "user",
-                                "content": f"Merge these two responses:\n\nVersion 1: {target_node.get('response', '')}\n\nVersion 2: {source_node.get('response', '')}"
-                            }
-                        ],
-                        "max_tokens": 500
-                    },
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-            merged_node = target_node.copy()
-            merged_node["response"] = result["choices"][0]["message"]["content"]
-            merged_node["merge_info"] = {"merged_from": [source_node["node_id"], target_node["node_id"]]}
-            return merged_node
-        except Exception as e:
-            return target_node
+        merged_node = target_node.copy()
+        merged_node["response"] = (
+            "Merged local-only response:\n"
+            f"Target: {target_node.get('response', '')}\n"
+            f"Source: {source_node.get('response', '')}"
+        )
+        merged_node["merge_info"] = {"merged_from": [source_node["node_id"], target_node["node_id"]]}
+        return merged_node
 
     def suggest_conflict_resolution(self, source_node: dict, target_node: dict) -> str:
         """Suggest how to resolve a conflict"""
@@ -216,28 +183,15 @@ class TenetBranchMerger:
         else:
             return "Responses are similar in length - manual review recommended"
 
-    async def create_merged_branch(self, conversation_id: str, target_branch: dict,
+    async def create_merged_branch(self, conversation_id: str, source_branch: dict, target_branch: dict,
                                   nodes: list, user_id: str) -> str:
         """Create the merged branch"""
-        merged_branch_id = str(uuid.uuid4())
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.config.BACKEND_API_URL}/api/branches",
-                json={
-                    "action": "create",
-                    "conversation_id": conversation_id,
-                    "branch_name": f"Merged {target_branch.get('branch_name', 'branch')}",
-                    "nodes": nodes,
-                    "user_id": user_id,
-                    "merge_info": {
-                        "merged_at": time.time(),
-                        "merged_from": target_branch.get("branch_id")
-                    }
-                },
-                timeout=15.0
-            )
-            response.raise_for_status()
-            return merged_branch_id
+        merged = dag_store.merge_branches(
+            conversation_id=conversation_id,
+            source_branch_id=source_branch.get("branch_id"),
+            target_branch_id=target_branch.get("branch_id"),
+        )
+        return merged["branch_id"]
 
     def generate_merge_summary(self, source_branch: dict, target_branch: dict, conflicts: list) -> str:
         """Generate summary of merge operation"""

@@ -1,13 +1,8 @@
 from uagents import Agent, Context
-from protocols.chat_protocol import (
-    ChatRequest, ChatResponse, PrivacyAnalysisRequest, PrivacyAnalysisResponse,
-    chat_protocol, PrivacyLevel, ExecutionLocation
-)
-from protocols.branch_protocol import BranchRequest, BranchResponse, branch_protocol
+from protocols.chat_protocol import ChatRequest, ChatResponse, chat_protocol, ExecutionLocation
+from protocols.branch_protocol import BranchRequest, BranchResponse, branch_protocol, BranchAction
 from config.agent_config import AgentConfig
-import httpx
-import asyncio
-import json
+from utils.local_runtime import dag_store, memory_store, router
 import time
 
 class TenetOrchestrator:
@@ -23,13 +18,6 @@ class TenetOrchestrator:
             port=self.config.ORCHESTRATOR_PORT
         )
         
-        # Specialist agent addresses (will be auto-discovered)
-        self.privacy_router_address = None
-        self.branch_manager_address = None
-        self.model_coordinator_address = None
-        self.context_keeper_address = None
-        
-        # Performance tracking
         self.performance_metrics = {
             "total_requests": 0,
             "local_requests": 0,
@@ -52,21 +40,29 @@ class TenetOrchestrator:
             self.performance_metrics["total_requests"] += 1
             
             try:
-                # Step 1: Analyze privacy requirements
-                privacy_assessment = await self.analyze_privacy(msg)
-                
-                # Step 2: Route based on privacy level
-                if privacy_assessment["level"] == PrivacyLevel.SENSITIVE:
-                    # Route to local model (Person 2's hardware)
-                    response_data = await self.route_to_local_model(msg)
+                privacy_assessment = router.analyze_privacy(msg.prompt, msg.privacy_level.value)
+                execution_location = router.choose_execution_location(privacy_assessment["privacy_level"])
+                response_data = self.generate_local_response(msg, privacy_assessment)
+                if execution_location == "local":
                     self.performance_metrics["local_requests"] += 1
                 else:
-                    # Route to cloud API
-                    response_data = await self.route_to_cloud_model(msg)
                     self.performance_metrics["cloud_requests"] += 1
-                
-                # Step 3: Store conversation context
-                await self.store_conversation_context(msg, response_data)
+
+                node = dag_store.add_node(
+                    conversation_id=msg.conversation_id,
+                    branch_id=msg.branch_id,
+                    parent_id=(msg.context or {}).get("parent_id") if msg.context else None,
+                    prompt=msg.prompt,
+                    response=response_data["response"],
+                    model_used=response_data["model_used"],
+                    execution_location=ExecutionLocation.LOCAL.value,
+                    metadata=response_data["metadata"],
+                )
+                memory_store.store(
+                    context=node,
+                    conversation_id=msg.conversation_id,
+                    branch_id=node.get("branch_id"),
+                )
                 
                 # Step 4: Calculate performance metrics
                 response_time = (time.time() - start_time) * 1000
@@ -75,7 +71,6 @@ class TenetOrchestrator:
                     self.performance_metrics["total_requests"]
                 )
                 
-                # Step 5: Send response back
                 response_data["performance_metrics"] = {
                     "response_time_ms": response_time,
                     "total_requests": self.performance_metrics["total_requests"],
@@ -85,12 +80,11 @@ class TenetOrchestrator:
                 await ctx.send(sender, ChatResponse(**response_data))
                 
             except Exception as e:
-                # Error handling
                 self.performance_metrics["error_count"] += 1
                 error_response = {
                     "response": f"I apologize, but I encountered an error: {str(e)}",
                     "model_used": "error",
-                    "execution_location": ExecutionLocation.CLOUD,
+                    "execution_location": ExecutionLocation.LOCAL,
                     "conversation_id": msg.conversation_id,
                     "branch_id": msg.branch_id,
                     "metadata": {"error": True, "error_type": str(type(e).__name__)},
@@ -103,8 +97,7 @@ class TenetOrchestrator:
             """Handle conversation branching requests"""
             
             try:
-                # Route branch operations to branch manager
-                branch_result = await self.create_branch(msg)
+                branch_result = self.handle_branch_action(msg)
                 
                 response = BranchResponse(
                     success=branch_result["success"],
@@ -128,180 +121,50 @@ class TenetOrchestrator:
                 )
                 await ctx.send(sender, error_response)
     
-    async def analyze_privacy(self, msg: ChatRequest) -> dict:
-        """Analyze privacy level of the request"""
-        
-        # Check explicit privacy level
-        if msg.privacy_level == PrivacyLevel.SENSITIVE:
-            return {"level": PrivacyLevel.SENSITIVE, "confidence": 1.0}
-        
-        # Analyze content for sensitive information
-        prompt_lower = msg.prompt.lower()
-        has_sensitive = any(keyword in prompt_lower for keyword in self.config.SENSITIVE_KEYWORDS)
-        
-        if has_sensitive:
-            return {"level": PrivacyLevel.SENSITIVE, "confidence": 0.9}
-        elif msg.privacy_level == PrivacyLevel.PRIVATE:
-            return {"level": PrivacyLevel.PRIVATE, "confidence": 1.0}
-        else:
-            return {"level": PrivacyLevel.PUBLIC, "confidence": 1.0}
-    
-    async def route_to_local_model(self, msg: ChatRequest) -> dict:
-        """Route request to local model on ASUS hardware"""
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.HARDWARE_API_URL}/generate",
-                    json={
-                        "prompt": msg.prompt,
-                        "conversation_id": msg.conversation_id,
-                        "branch_id": msg.branch_id,
-                        "model": self.config.DEFAULT_LOCAL_MODEL
-                    },
-                    timeout=self.config.LOCAL_TIMEOUT
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "response": result.get("response", "Local model response"),
-                    "model_used": result.get("model", self.config.DEFAULT_LOCAL_MODEL),
-                    "execution_location": ExecutionLocation.LOCAL,
-                    "conversation_id": msg.conversation_id,
-                    "branch_id": msg.branch_id,
-                    "metadata": {
-                        "privacy": "local-execution",
-                        "hardware_accelerated": True
-                    }
-                }
-                
-        except Exception as e:
-            print(f"Local model failed: {e}, falling back to cloud")
-            return await self.route_to_cloud_model(msg)
-    
-    async def route_to_cloud_model(self, msg: ChatRequest) -> dict:
-        """Route request to cloud API"""
-        
-        try:
-            # Try OpenAI first
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.config.OPENAI_API_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": self.config.DEFAULT_CLOUD_MODEL,
-                        "messages": [{"role": "user", "content": msg.prompt}],
-                        "max_tokens": 1000
-                    },
-                    timeout=self.config.CLOUD_TIMEOUT
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "response": result["choices"][0]["message"]["content"],
-                    "model_used": self.config.DEFAULT_CLOUD_MODEL,
-                    "execution_location": ExecutionLocation.CLOUD,
-                    "conversation_id": msg.conversation_id,
-                    "branch_id": msg.branch_id,
-                    "metadata": {
-                        "privacy": "cloud-execution",
-                        "provider": "openai"
-                    }
-                }
-                
-        except Exception as e:
-            # Fallback to simpler model if main fails
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {self.config.OPENAI_API_KEY}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": self.config.FALLBACK_MODEL,
-                            "messages": [{"role": "user", "content": msg.prompt}],
-                            "max_tokens": 500
-                        },
-                        timeout=self.config.CLOUD_TIMEOUT
-                    )
-                    response.raise_for_status()
-                    result = response.json()
-                    
-                    return {
-                        "response": result["choices"][0]["message"]["content"],
-                        "model_used": self.config.FALLBACK_MODEL,
-                        "execution_location": ExecutionLocation.CLOUD,
-                        "conversation_id": msg.conversation_id,
-                        "branch_id": msg.branch_id,
-                        "metadata": {
-                            "privacy": "cloud-execution-fallback",
-                            "provider": "openai"
-                        }
-                    }
-            except Exception as fallback_error:
-                raise Exception(f"Both primary and fallback cloud APIs failed: {str(e)}")
-    
-    async def store_conversation_context(self, msg: ChatRequest, response: dict):
-        """Store conversation context via context keeper"""
-        
-        try:
-            context_data = {
-                "conversation_id": msg.conversation_id,
-                "branch_id": msg.branch_id,
-                "prompt": msg.prompt,
-                "response": response["response"],
-                "model_used": response["model_used"],
-                "execution_location": response["execution_location"],
-                "timestamp": time.time(),
-                "metadata": response.get("metadata", {})
-            }
-            
-            # Store via backend API (Person 4)
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/context",
-                    json=context_data,
-                    timeout=5.0
-                )
-                
-        except Exception as e:
-            print(f"Failed to store context: {e}")
-    
-    async def create_branch(self, msg: BranchRequest) -> dict:
-        """Create new conversation branch via backend API"""
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/branches",
-                    json={
-                        "action": msg.action,
-                        "conversation_id": msg.conversation_id,
-                        "node_id": msg.node_id,
-                        "branch_name": msg.branch_name,
-                        "user_id": msg.user_id,
-                        "source_branch_id": msg.source_branch_id,
-                        "target_branch_id": msg.target_branch_id
-                    },
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                return response.json()
-                
-        except Exception as e:
+    def generate_local_response(self, msg: ChatRequest, privacy_assessment: dict) -> dict:
+        response = (
+            f"Local-only mode response for '{msg.prompt[:80]}'. "
+            "This response is generated without outbound service calls."
+        )
+        return {
+            "response": response,
+            "model_used": self.config.DEFAULT_LOCAL_MODEL,
+            "execution_location": ExecutionLocation.LOCAL,
+            "conversation_id": msg.conversation_id,
+            "branch_id": msg.branch_id,
+            "metadata": {
+                "privacy_level": privacy_assessment["privacy_level"],
+                "route_recommendation": privacy_assessment["recommendation"],
+                "local_only_mode": True,
+            },
+        }
+
+    def handle_branch_action(self, msg: BranchRequest) -> dict:
+        action = msg.action
+        if action in {BranchAction.CREATE, BranchAction.FORK}:
+            branch = dag_store.create_branch(msg.conversation_id, msg.node_id, msg.branch_name)
             return {
-                "success": False,
-                "branch_id": "",
-                "node_id": "",
-                "message": f"Failed to create branch: {str(e)}"
+                "success": True,
+                "branch_id": branch["branch_id"],
+                "node_id": branch.get("head_node_id"),
+                "message": "Branch created",
             }
+        if action == BranchAction.LIST:
+            branches = dag_store.list_branches(msg.conversation_id, include_pruned=msg.include_pruned)
+            return {"success": True, "branches": branches, "message": f"Found {len(branches)} branches"}
+        if action == BranchAction.SWITCH:
+            branch = dag_store.switch_branch(msg.conversation_id, msg.branch_id or "")
+            return {"success": True, "branch_id": branch["branch_id"], "message": "Branch switched"}
+        if action == BranchAction.ROLLBACK:
+            branch = dag_store.rollback(msg.conversation_id, msg.branch_id or "", msg.target_node_id or "")
+            return {"success": True, "branch_id": branch["branch_id"], "node_id": branch["head_node_id"], "message": "Rollback complete"}
+        if action == BranchAction.GET_GRAPH:
+            graph = dag_store.get_graph(msg.conversation_id, include_pruned=msg.include_pruned)
+            return {"success": True, "graph": graph, "message": "Graph loaded"}
+        if action == BranchAction.DELETE:
+            ok = dag_store.delete_branch(msg.conversation_id, msg.branch_id or "")
+            return {"success": ok, "message": "Branch pruned" if ok else "Unable to delete branch"}
+        return {"success": False, "message": f"Unsupported action: {action}"}
     
     def run(self):
         """Start the orchestrator agent"""

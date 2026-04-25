@@ -3,8 +3,7 @@ from protocols.search_protocol import (
     SearchRequest, SearchResponse, SearchResult, search_protocol, SearchType
 )
 from config.agent_config import AgentConfig
-import httpx
-import json
+from utils.local_runtime import dag_store
 
 class TenetSemanticSearch:
     """Performs semantic search across conversations"""
@@ -60,23 +59,7 @@ class TenetSemanticSearch:
         import time
         start_time = time.time()
         try:
-            query_embedding = await self.get_embedding(msg.query)
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/search/semantic",
-                    json={
-                        "query_embedding": query_embedding,
-                        "conversation_id": msg.conversation_id,
-                        "branch_id": msg.branch_id,
-                        "limit": msg.limit,
-                        "filters": msg.filters
-                    },
-                    timeout=15.0
-                )
-                response.raise_for_status()
-                search_results = response.json()
-                
+            search_results = self.local_search(msg.query, msg.conversation_id, msg.branch_id, msg.limit)
             results = [
                 SearchResult(
                     result_id=r["result_id"],
@@ -87,7 +70,7 @@ class TenetSemanticSearch:
                     relevance_score=r["relevance_score"],
                     metadata=r.get("metadata")
                 )
-                for r in search_results.get("results", [])
+                for r in search_results
             ]
             
             search_time = (time.time() - start_time) * 1000
@@ -95,13 +78,13 @@ class TenetSemanticSearch:
             return {
                 "success": True,
                 "results": results,
-                "total_results": search_results.get("total_results", len(results)),
+                "total_results": len(results),
                 "search_time_ms": search_time,
                 "query_understood": True,
                 "suggestions": await self.generate_suggestions(msg.query),
                 "message": f"Semantic search completed: {len(results)} results found"
             }
-        except Exception as e:
+        except Exception:
             return await self.keyword_search(msg)
 
     async def keyword_search(self, msg: SearchRequest) -> dict:
@@ -109,21 +92,7 @@ class TenetSemanticSearch:
         import time
         start_time = time.time()
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/search/keyword",
-                    json={
-                        "query": msg.query,
-                        "conversation_id": msg.conversation_id,
-                        "branch_id": msg.branch_id,
-                        "limit": msg.limit,
-                        "filters": msg.filters
-                    },
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                search_results = response.json()
-                
+            search_results = self.local_search(msg.query, msg.conversation_id, msg.branch_id, msg.limit)
             results = [
                 SearchResult(
                     result_id=r["result_id"],
@@ -134,7 +103,7 @@ class TenetSemanticSearch:
                     relevance_score=r.get("relevance_score", 0.8),
                     metadata=r.get("metadata")
                 )
-                for r in search_results.get("results", [])
+                for r in search_results
             ]
             
             search_time = (time.time() - start_time) * 1000
@@ -142,7 +111,7 @@ class TenetSemanticSearch:
             return {
                 "success": True,
                 "results": results,
-                "total_results": search_results.get("total_results", len(results)),
+                "total_results": len(results),
                 "search_time_ms": search_time,
                 "query_understood": True,
                 "suggestions": [],
@@ -201,21 +170,7 @@ class TenetSemanticSearch:
         try:
             pattern = re.compile(msg.query, re.IGNORECASE)
             
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/search/regex",
-                    json={
-                        "pattern": msg.query,
-                        "conversation_id": msg.conversation_id,
-                        "branch_id": msg.branch_id,
-                        "limit": msg.limit,
-                        "filters": msg.filters
-                    },
-                    timeout=15.0
-                )
-                response.raise_for_status()
-                search_results = response.json()
-                
+            search_results = self.local_search(msg.query, msg.conversation_id, msg.branch_id, msg.limit, regex=True)
             results = [
                 SearchResult(
                     result_id=r["result_id"],
@@ -226,7 +181,7 @@ class TenetSemanticSearch:
                     relevance_score=r.get("relevance_score", 0.7),
                     metadata=r.get("metadata")
                 )
-                for r in search_results.get("results", [])
+                for r in search_results
             ]
             
             search_time = (time.time() - start_time) * 1000
@@ -234,7 +189,7 @@ class TenetSemanticSearch:
             return {
                 "success": True,
                 "results": results,
-                "total_results": search_results.get("total_results", len(results)),
+                "total_results": len(results),
                 "search_time_ms": search_time,
                 "query_understood": True,
                 "suggestions": [],
@@ -251,68 +206,39 @@ class TenetSemanticSearch:
                 "message": f"Regex search failed: {str(e)}"
             }
 
-    async def get_embedding(self, text: str) -> list:
-        """Get text embedding using OpenAI"""
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api.openai.com/v1/embeddings",
-                    headers={
-                        "Authorization": f"Bearer {self.config.OPENAI_API_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "text-embedding-ada-002",
-                        "input": text
-                    },
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                return result["data"][0]["embedding"]
-        except Exception as e:
-            return [hash(text) % 1000] * 1536 
-
     async def semantic_search_internal(self, msg: SearchRequest) -> list:
         """Internal semantic search without formatting"""
-        try:
-            query_embedding = await self.get_embedding(msg.query)
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/search/semantic",
-                    json={
-                        "query_embedding": query_embedding,
-                        "conversation_id": msg.conversation_id,
-                        "branch_id": msg.branch_id,
-                        "limit": msg.limit * 2, 
-                        "filters": msg.filters
-                    },
-                    timeout=15.0
-                )
-                response.raise_for_status()
-                return response.json().get("results", [])
-        except Exception as e:
-            return []
+        return self.local_search(msg.query, msg.conversation_id, msg.branch_id, (msg.limit or 10) * 2)
 
     async def keyword_search_internal(self, msg: SearchRequest) -> list:
         """Internal keyword search without formatting"""
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/search/keyword",
-                    json={
-                        "query": msg.query,
-                        "conversation_id": msg.conversation_id,
-                        "branch_id": msg.branch_id,
-                        "limit": msg.limit * 2,
-                        "filters": msg.filters
-                    },
-                    timeout=10.0
+        return self.local_search(msg.query, msg.conversation_id, msg.branch_id, (msg.limit or 10) * 2)
+
+    def local_search(self, query: str, conversation_id: str, branch_id: str, limit: int, regex: bool = False) -> list:
+        import re
+        graph = dag_store.get_graph(conversation_id, include_pruned=False)
+        nodes = graph.get("nodes", [])
+        results = []
+        for node in nodes:
+            if branch_id and node.get("branch_id") != branch_id:
+                continue
+            content = f"{node.get('prompt', '')}\n{node.get('response', '')}"
+            matched = re.search(query, content, flags=re.IGNORECASE) if regex else query.lower() in content.lower()
+            if matched:
+                results.append(
+                    {
+                        "result_id": node["node_id"],
+                        "conversation_id": node["conversation_id"],
+                        "branch_id": node.get("branch_id"),
+                        "node_id": node["node_id"],
+                        "content": content[:400],
+                        "relevance_score": min(1.0, 0.5 + len(query) / max(len(content), 1)),
+                        "metadata": node.get("metadata", {}),
+                    }
                 )
-                response.raise_for_status()
-                return response.json().get("results", [])
-        except Exception as e:
-            return []
+            if len(results) >= limit:
+                break
+        return results
 
     def combine_search_results(self, semantic_results: list, keyword_results: list, limit: int) -> list:
         """Combine and rank results from multiple search types"""

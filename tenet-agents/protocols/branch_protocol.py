@@ -4,11 +4,14 @@ from typing import Optional, List, Dict
 from enum import Enum
 
 class BranchAction(str, Enum):
+    FORK = "fork"
     CREATE = "create"
     DELETE = "delete"
     MERGE = "merge"
     SWITCH = "switch"
     LIST = "list"
+    ROLLBACK = "rollback"
+    GET_GRAPH = "get_graph"
 
 class BranchRequest(BaseModel):
     """Request for branch operations"""
@@ -18,6 +21,9 @@ class BranchRequest(BaseModel):
     branch_name: Optional[str] = Field(None, description="Name for new branch")
     source_branch_id: Optional[str] = Field(None, description="Source branch for merge")
     target_branch_id: Optional[str] = Field(None, description="Target branch for merge")
+    branch_id: Optional[str] = Field(None, description="Branch identifier for switch/rollback")
+    target_node_id: Optional[str] = Field(None, description="Target node for rollback")
+    include_pruned: bool = Field(default=False, description="Include pruned nodes in graph/list")
     user_id: str = Field(..., description="User performing the action")
 
 class BranchResponse(BaseModel):
@@ -27,6 +33,7 @@ class BranchResponse(BaseModel):
     new_branch_id: Optional[str] = Field(None, description="ID of new branch")
     new_node_id: Optional[str] = Field(None, description="ID of new node")
     branches: Optional[List[Dict]] = Field(None, description="List of branches")
+    graph: Optional[Dict] = Field(None, description="Conversation DAG payload")
     message: str = Field(..., description="Status message")
 
 class BranchInfo(BaseModel):

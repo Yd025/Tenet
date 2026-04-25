@@ -1,11 +1,11 @@
 from uagents import Agent, Context
 from protocols.export_protocol import (
-    ExportRequest, ExportResponse, export_protocol, ExportFormat
+    ExportRequest, ExportResponse, export_protocol, ExportFormat, ExportTarget
 )
 from config.agent_config import AgentConfig
-import httpx
 import json
 from datetime import datetime
+from utils.local_runtime import dag_store
 
 class TenetConversationExporter:
     """Exports conversations in various formats"""
@@ -216,39 +216,20 @@ class TenetConversationExporter:
             }
 
     async def get_export_data(self, msg: ExportRequest) -> dict:
-        """Get data from backend for export"""
-        if msg.target_type == "conversation":
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.config.BACKEND_API_URL}/api/conversations/{msg.target_id}",
-                    params={"include_metadata": msg.include_metadata, "include_branches": msg.include_branches},
-                    timeout=20.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                data["items_count"] = sum(len(branch.get("nodes", [])) for branch in data.get("branches", []))
-                return data
-        elif msg.target_type == "branch":
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.config.BACKEND_API_URL}/api/branches/{msg.target_id}",
-                    params={"include_metadata": msg.include_metadata},
-                    timeout=15.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                data["items_count"] = len(data.get("nodes", []))
-                return data
-        elif msg.target_type == "node":
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.config.BACKEND_API_URL}/api/nodes/{msg.target_id}",
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                data["items_count"] = 1
-                return data
+        """Get data from local DAG store for export"""
+        if msg.target_type == ExportTarget.CONVERSATION:
+            data = dag_store.get_graph(msg.target_id, include_pruned=False)
+            data["branches"] = [dag_store.get_branch(b["branch_id"]) or b for b in data.get("branches", [])]
+            data["items_count"] = len(data.get("nodes", []))
+            return data
+        elif msg.target_type == ExportTarget.BRANCH:
+            data = dag_store.get_branch(msg.target_id) or {}
+            data["items_count"] = len(data.get("nodes", []))
+            return data
+        elif msg.target_type == ExportTarget.NODE:
+            data = dag_store.get_node(msg.target_id) or {}
+            data["items_count"] = 1 if data else 0
+            return data
         else:
             raise ValueError(f"Unknown target type: {msg.target_type}")
 
@@ -361,8 +342,7 @@ class TenetConversationExporter:
         """Save export to file and return URL"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"export_{target_id}_{timestamp}.{format}"
-        mock_url = f"https://storage.tenet.ai/exports/{filename}"
-        return mock_url
+        return f"local://exports/{filename}"
 
     def run(self):
         """Start the conversation exporter agent"""

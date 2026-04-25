@@ -1,6 +1,15 @@
 from uagents.protocol import Protocol
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
+from enum import Enum
+
+
+class StorageAction(str, Enum):
+    LIST = "list"
+    LOAD = "load"
+    UNLOAD = "unload"
+    STATUS = "status"
+    OPTIMIZE = "optimize"
 
 class ModelInfo(BaseModel):
     """Information about a model"""
@@ -13,14 +22,14 @@ class ModelInfo(BaseModel):
 
 class StorageRequest(BaseModel):
     """Request for storage operations"""
-    action: str = Field(..., description="Action: list, load, unload, download, remove, optimize")
+    action: StorageAction = Field(..., description="Action: list, load, unload, status, optimize")
     model_name: Optional[str] = Field(None, description="Model name for specific actions")
     parameters: Optional[Dict] = Field(None, description="Additional parameters")
 
 class StorageResponse(BaseModel):
     """Response from storage operations"""
     success: bool = Field(..., description="Whether operation was successful")
-    action: str = Field(..., description="Action performed")
+    action: StorageAction = Field(..., description="Action performed")
     models: Optional[List[ModelInfo]] = Field(None, description="List of models")
     message: str = Field(..., description="Status message")
     storage_info: Optional[Dict] = Field(None, description="Storage information")

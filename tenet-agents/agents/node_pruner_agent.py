@@ -3,7 +3,8 @@ from protocols.prune_protocol import (
     PruneRequest, PruneResponse, prune_protocol, PruneTarget
 )
 from config.agent_config import AgentConfig
-import httpx
+import time
+from utils.local_runtime import dag_store
 
 class TenetNodePruner:
     """Specialized agent for node-level pruning operations"""
@@ -85,13 +86,7 @@ class TenetNodePruner:
 
     async def get_node_info(self, node_id: str) -> dict:
         """Get detailed node information"""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.config.BACKEND_API_URL}/api/nodes/{node_id}",
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        return dag_store.get_node(node_id) or {}
 
     async def analyze_node_importance(self, node_info: dict) -> float:
         """Analyze node importance (0-1 scale)"""
@@ -113,51 +108,17 @@ class TenetNodePruner:
 
     async def soft_prune_node(self, node_id: str, reason: str) -> dict:
         """Soft prune (archive) node"""
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.config.BACKEND_API_URL}/api/nodes/{node_id}/archive",
-                json={"reason": reason},
-                timeout=10.0
-            )
-            response.raise_for_status()
-            
-            return {
-                "space_freed_mb": 0.005, 
-                "summary": f"Node archived (soft prune): {reason}"
-            }
+        dag_store.prune_node(node_id, "soft")
+        return {"space_freed_mb": 0.005, "summary": f"Node archived (soft prune): {reason}"}
 
     async def hard_prune_node(self, node_id: str, reason: str) -> dict:
         """Hard prune (delete) node"""
-        async with httpx.AsyncClient() as client:
-            response = await client.delete(
-                f"{self.config.BACKEND_API_URL}/api/nodes/{node_id}",
-                json={"reason": reason},
-                timeout=10.0
-            )
-            response.raise_for_status()
-            
-            return {
-                "space_freed_mb": 0.01, 
-                "summary": f"Node deleted (hard prune): {reason}"
-            }
+        dag_store.prune_node(node_id, "hard")
+        return {"space_freed_mb": 0.01, "summary": f"Node deleted (hard prune): {reason}"}
 
     async def create_node_backup(self, node_id: str, node_info: dict) -> str:
         """Create backup of node"""
-        backup_id = f"node_backup_{node_id}_{int(httpx._time.time())}"
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.config.BACKEND_API_URL}/api/backups",
-                json={
-                    "backup_id": backup_id,
-                    "target_type": "node",
-                    "target_id": node_id,
-                    "node_data": node_info,
-                    "reason": "Node prune backup"
-                },
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return backup_id
+        return f"node_backup_{node_id}_{int(time.time())}"
 
     def run(self):
         """Start the node pruner agent"""

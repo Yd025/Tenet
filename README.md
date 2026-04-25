@@ -60,6 +60,16 @@ The hardware enables:
 
 ## Technical Architecture
 
+### Local-Only Implementation Status
+
+The current `tenet-agents` implementation now supports a local-only runtime mode for end-to-end development without external FastAPI dependencies.
+
+- Internal agent flows are executed via shared in-memory services instead of HTTP calls.
+- DAG operations (branch, rollback, prune, merge) are available through local stores.
+- Context memory, model registry simulation, semantic search, summarization, and export are wired to local services.
+- A smoke test suite is available at `tenet-agents/tests/test_local_smoke.py` to validate core flows.
+- Cloud/off-device execution can be reintroduced later as an optional deployment mode.
+
 ### Graph Architecture
 
 * **MongoDB Atlas** for storing conversation history as a graph of nodes

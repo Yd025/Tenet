@@ -4,6 +4,7 @@ from protocols.chat_protocol import (
     chat_protocol, PrivacyLevel
 )
 from config.agent_config import AgentConfig
+from utils.local_runtime import router
 import re
 
 class TenetPrivacyRouter:
@@ -59,11 +60,11 @@ class TenetPrivacyRouter:
             
             try:
                 # Perform privacy analysis
-                analysis_result = self.analyze_content_privacy(msg.content)
+                analysis_result = router.analyze_privacy(msg.content, PrivacyLevel.PRIVATE.value)
                 
                 # Create response
                 response = PrivacyAnalysisResponse(
-                    privacy_level=analysis_result["level"],
+                    privacy_level=analysis_result["privacy_level"],
                     confidence=analysis_result["confidence"],
                     sensitive_elements=analysis_result["sensitive_elements"],
                     recommendation=analysis_result["recommendation"]
@@ -117,7 +118,7 @@ class TenetPrivacyRouter:
         confidence_score = min(confidence_score, 1.0)
         
         return {
-            "level": privacy_level,
+            "privacy_level": privacy_level,
             "confidence": confidence_score,
             "sensitive_elements": list(set(sensitive_elements)),  # Remove duplicates
             "recommendation": recommendation

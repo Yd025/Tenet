@@ -1,10 +1,9 @@
 from uagents import Agent, Context
 from protocols.summary_protocol import (
-    SummaryRequest, SummaryResponse, SummaryStatistics, summary_protocol
+    SummaryRequest, SummaryResponse, summary_protocol, SummaryTarget
 )
 from config.agent_config import AgentConfig
-import httpx
-import json
+from utils.local_runtime import dag_store
 
 class TenetBranchSummarizer:
     """Summarizes branches and conversations"""
@@ -24,11 +23,11 @@ class TenetBranchSummarizer:
         async def handle_summary_request(ctx: Context, sender: str, msg: SummaryRequest):
             """Handle summarization requests"""
             try:
-                if msg.target_type == "branch":
+                if msg.target_type == SummaryTarget.BRANCH:
                     response = await self.summarize_branch(msg)
-                elif msg.target_type == "conversation":
+                elif msg.target_type == SummaryTarget.CONVERSATION:
                     response = await self.summarize_conversation(msg)
-                elif msg.target_type == "node":
+                elif msg.target_type == SummaryTarget.NODE:
                     response = await self.summarize_node(msg)
                 else:
                     response = {
@@ -52,16 +51,9 @@ class TenetBranchSummarizer:
     async def summarize_branch(self, msg: SummaryRequest) -> dict:
         """Summarize a branch"""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.config.BACKEND_API_URL}/api/branches/{msg.target_id}",
-                    timeout=15.0
-                )
-                response.raise_for_status()
-                branch_data = response.json()
-                
+            branch_data = dag_store.get_branch(msg.target_id) or {}
             content = self.extract_branch_content(branch_data)
-            summary_data = await self.generate_summary(content, msg.summary_length)
+            summary_data = self.generate_summary(content, msg.summary_length)
             stats = self.calculate_statistics(content, summary_data["summary"])
             
             return {
@@ -83,16 +75,14 @@ class TenetBranchSummarizer:
     async def summarize_conversation(self, msg: SummaryRequest) -> dict:
         """Summarize an entire conversation"""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.config.BACKEND_API_URL}/api/conversations/{msg.target_id}",
-                    timeout=20.0
-                )
-                response.raise_for_status()
-                conversation_data = response.json()
-                
+            conversation_data = dag_store.get_graph(msg.target_id, include_pruned=False)
+            branches = []
+            for branch in conversation_data.get("branches", []):
+                payload = dag_store.get_branch(branch["branch_id"]) or branch
+                branches.append(payload)
+            conversation_data["branches"] = branches
             content = self.extract_conversation_content(conversation_data)
-            summary_data = await self.generate_summary(content, msg.summary_length)
+            summary_data = self.generate_summary(content, msg.summary_length)
             stats = self.calculate_statistics(content, summary_data["summary"])
             
             return {
@@ -114,16 +104,9 @@ class TenetBranchSummarizer:
     async def summarize_node(self, msg: SummaryRequest) -> dict:
         """Summarize a single node"""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.config.BACKEND_API_URL}/api/nodes/{msg.target_id}",
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                node_data = response.json()
-                
+            node_data = dag_store.get_node(msg.target_id) or {}
             content = f"Prompt: {node_data.get('prompt', '')}\nResponse: {node_data.get('response', '')}"
-            summary_data = await self.generate_summary(content, "short")
+            summary_data = self.generate_summary(content, "short")
             
             return {
                 "success": True,
@@ -162,54 +145,17 @@ class TenetBranchSummarizer:
             content_parts.append(self.extract_branch_content(branch))
         return "\n".join(content_parts)
 
-    async def generate_summary(self, content: str, length: str) -> dict:
+    def generate_summary(self, content: str, length: str) -> dict:
         """Generate AI summary of content"""
-        try:
-            length_instructions = {
-                "short": "Provide a concise 2-3 sentence summary",
-                "medium": "Provide a comprehensive summary with key points",
-                "long": "Provide a detailed summary with all important information"
-            }
-            instruction = length_instructions.get(length, length_instructions["medium"])
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.config.OPENAI_API_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "gpt-3.5-turbo",
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": f"You are a expert at summarizing AI conversations. {instruction}. Extract key points and provide a clear summary."
-                            },
-                            {
-                                "role": "user",
-                                "content": f"Please summarize this conversation:\n\n{content[:4000]}"
-                            }
-                        ],
-                        "max_tokens": 500 if length == "short" else 1000
-                    },
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-            summary_text = result["choices"][0]["message"]["content"]
-            key_points = self.extract_key_points(summary_text)
-            
-            return {
-                "summary": summary_text,
-                "key_points": key_points
-            }
-        except Exception as e:
-            return {
-                "summary": content[:500] + "..." if len(content) > 500 else content,
-                "key_points": []
-            }
+        sentences = [line.strip() for line in content.split("\n") if line.strip()]
+        if length == "short":
+            picked = sentences[:3]
+        elif length == "long":
+            picked = sentences[:12]
+        else:
+            picked = sentences[:6]
+        summary_text = "\n".join(picked) if picked else "No content available for summary."
+        return {"summary": summary_text, "key_points": self.extract_key_points(summary_text)}
 
     def extract_key_points(self, summary: str) -> list:
         """Extract key points from summary"""
