@@ -1,11 +1,11 @@
 from uagents import Agent, Context
 from protocols.storage_protocol import (
     StorageRequest, StorageResponse, ModelInfo, ModelStatusRequest,
-    ModelStatusResponse, storage_protocol
+    ModelStatusResponse, storage_protocol, StorageAction
 )
 from config.agent_config import AgentConfig
-import httpx
 import asyncio
+from utils.local_runtime import model_registry
 
 class TenetModelCoordinator:
     """Coordinates AI model loading and hardware integration"""
@@ -35,15 +35,15 @@ class TenetModelCoordinator:
             """Handle model storage and coordination requests"""
             
             try:
-                if msg.action == "list":
+                if msg.action == StorageAction.LIST:
                     response = await self.list_models()
-                elif msg.action == "load":
+                elif msg.action == StorageAction.LOAD:
                     response = await self.load_model(msg.model_name, msg.parameters)
-                elif msg.action == "unload":
+                elif msg.action == StorageAction.UNLOAD:
                     response = await self.unload_model(msg.model_name)
-                elif msg.action == "status":
+                elif msg.action == StorageAction.STATUS:
                     response = await self.get_model_status(msg.model_name)
-                elif msg.action == "optimize":
+                elif msg.action == StorageAction.OPTIMIZE:
                     response = await self.optimize_models()
                 else:
                     response = {
@@ -95,54 +95,16 @@ class TenetModelCoordinator:
         """List all available models"""
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.config.HARDWARE_API_URL}/models",
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                models_data = response.json()
-                
-                models = [
-                    ModelInfo(
-                        name=model.get("name"),
-                        size_gb=model.get("size_gb", 0.0),
-                        quantization=model.get("quantization", "unknown"),
-                        status=model.get("status", "unknown"),
-                        hardware_requirements=model.get("hardware_requirements", {}),
-                        last_used=model.get("last_used")
-                    )
-                    for model in models_data.get("models", [])
-                ]
-                
-                return {
-                    "success": True,
-                    "action": "list",
-                    "models": models,
-                    "message": f"Found {len(models)} models",
-                    "storage_info": models_data.get("storage_info", {})
-                }
-                
-        except Exception as e:
-            # Return mock data if hardware API unavailable
-            mock_models = [
-                ModelInfo(
-                    name="llama2-7b-4bit",
-                    size_gb=4.2,
-                    quantization="4bit",
-                    status="loaded",
-                    hardware_requirements={"ram_gb": 8, "vram_gb": 6},
-                    last_used="2024-01-15T10:30:00Z"
-                )
-            ]
-            
+            models = [ModelInfo(**model) for model in model_registry.list_models()]
             return {
                 "success": True,
-                "action": "list",
-                "models": mock_models,
-                "message": f"Found {len(mock_models)} models (mock data)",
+                "action": StorageAction.LIST,
+                "models": models,
+                "message": f"Found {len(models)} models",
                 "storage_info": {"total_gb": 100, "used_gb": 20, "available_gb": 80}
             }
+        except Exception as e:
+            return {"success": False, "action": StorageAction.LIST, "models": None, "message": str(e), "storage_info": None}
     
     async def load_model(self, model_name: str, parameters: dict = None) -> dict:
         """Load a model into memory"""
@@ -150,37 +112,26 @@ class TenetModelCoordinator:
         try:
             start_time = asyncio.get_event_loop().time()
             
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.HARDWARE_API_URL}/models/load",
-                    json={
-                        "model_name": model_name,
-                        "parameters": parameters or {}
-                    },
-                    timeout=60.0  # Allow up to 1 minute for loading
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                load_time = (asyncio.get_event_loop().time() - start_time) * 1000
-                self.model_load_times[model_name] = load_time
-                self.loaded_models[model_name] = {
-                    "loaded_at": asyncio.get_event_loop().time(),
-                    "load_time_ms": load_time
-                }
-                
-                return {
-                    "success": True,
-                    "action": "load",
-                    "models": None,
-                    "message": f"Model '{model_name}' loaded successfully in {load_time:.0f}ms",
-                    "storage_info": result.get("storage_info", {})
-                }
+            success, status_message = model_registry.load(model_name)
+            load_time = (asyncio.get_event_loop().time() - start_time) * 1000
+            self.model_load_times[model_name] = load_time
+            self.loaded_models[model_name] = {
+                "loaded_at": asyncio.get_event_loop().time(),
+                "load_time_ms": load_time
+            }
+            
+            return {
+                "success": success,
+                "action": StorageAction.LOAD,
+                "models": None,
+                "message": f"{status_message} in {load_time:.0f}ms",
+                "storage_info": {"local_only_mode": True}
+            }
                 
         except Exception as e:
             return {
                 "success": False,
-                "action": "load",
+                "action": StorageAction.LOAD,
                 "models": None,
                 "message": f"Failed to load model '{model_name}': {str(e)}",
                 "storage_info": None
@@ -190,33 +141,25 @@ class TenetModelCoordinator:
         """Unload a model from memory"""
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.HARDWARE_API_URL}/models/unload",
-                    json={"model_name": model_name},
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                # Remove from tracking
-                if model_name in self.loaded_models:
-                    del self.loaded_models[model_name]
-                if model_name in self.model_load_times:
-                    del self.model_load_times[model_name]
-                
-                return {
-                    "success": True,
-                    "action": "unload",
-                    "models": None,
-                    "message": f"Model '{model_name}' unloaded successfully",
-                    "storage_info": result.get("storage_info", {})
-                }
+            success, status_message = model_registry.unload(model_name)
+            # Remove from tracking
+            if model_name in self.loaded_models:
+                del self.loaded_models[model_name]
+            if model_name in self.model_load_times:
+                del self.model_load_times[model_name]
+            
+            return {
+                "success": success,
+                "action": StorageAction.UNLOAD,
+                "models": None,
+                "message": status_message,
+                "storage_info": {"local_only_mode": True}
+            }
                 
         except Exception as e:
             return {
                 "success": False,
-                "action": "unload",
+                "action": StorageAction.UNLOAD,
                 "models": None,
                 "message": f"Failed to unload model '{model_name}': {str(e)}",
                 "storage_info": None
@@ -226,26 +169,18 @@ class TenetModelCoordinator:
         """Get status of a specific model"""
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.config.HARDWARE_API_URL}/models/{model_name}/status",
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "success": True,
-                    "action": "status",
-                    "models": None,
-                    "message": f"Model '{model_name}' status retrieved",
-                    "storage_info": result
-                }
-                
+            status = model_registry.status(model_name)
+            return {
+                "success": True,
+                "action": StorageAction.STATUS,
+                "models": None,
+                "message": f"Model '{model_name}' status retrieved",
+                "storage_info": status
+            }
         except Exception as e:
             return {
                 "success": False,
-                "action": "status",
+                "action": StorageAction.STATUS,
                 "models": None,
                 "message": f"Failed to get model status: {str(e)}",
                 "storage_info": None
@@ -271,27 +206,18 @@ class TenetModelCoordinator:
         """Optimize model loading and memory usage"""
         
         try:
-            # Get optimization suggestions from hardware
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.HARDWARE_API_URL}/models/optimize",
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "success": True,
-                    "action": "optimize",
-                    "models": None,
-                    "message": result.get("message", "Model optimization completed"),
-                    "storage_info": result.get("storage_info", {})
-                }
-                
+            result = model_registry.optimize()
+            return {
+                "success": True,
+                "action": StorageAction.OPTIMIZE,
+                "models": None,
+                "message": result.get("message", "Model optimization completed"),
+                "storage_info": result
+            }
         except Exception as e:
             return {
                 "success": False,
-                "action": "optimize",
+                "action": StorageAction.OPTIMIZE,
                 "models": None,
                 "message": f"Optimization failed: {str(e)}",
                 "storage_info": None

@@ -1,13 +1,8 @@
 from uagents import Agent, Context
-from protocols.chat_protocol import (
-    ChatRequest, ChatResponse, PrivacyAnalysisRequest, PrivacyAnalysisResponse,
-    chat_protocol, PrivacyLevel, ExecutionLocation
-)
-from protocols.branch_protocol import BranchRequest, BranchResponse, branch_protocol
+from protocols.chat_protocol import ChatRequest, ChatResponse, chat_protocol, ExecutionLocation
+from protocols.branch_protocol import BranchRequest, BranchResponse, branch_protocol, BranchAction
 from config.agent_config import AgentConfig
-import httpx
-import asyncio
-import json
+from utils.local_runtime import dag_store, memory_store, router, capability_registry
 import time
 
 MODEL_MAP = {
@@ -69,13 +64,6 @@ class TenetOrchestrator:
             port=self.config.ORCHESTRATOR_PORT
         )
         
-        # Specialist agent addresses (will be auto-discovered)
-        self.privacy_router_address = None
-        self.branch_manager_address = None
-        self.model_coordinator_address = None
-        self.context_keeper_address = None
-        
-        # Performance tracking
         self.performance_metrics = {
             "total_requests": 0,
             "local_requests": 0,
@@ -98,21 +86,29 @@ class TenetOrchestrator:
             self.performance_metrics["total_requests"] += 1
             
             try:
-                # Step 1: Analyze privacy requirements
-                privacy_assessment = await self.analyze_privacy(msg)
-                
-                # Step 2: Route based on privacy level
-                if privacy_assessment["level"] == PrivacyLevel.SENSITIVE:
-                    # Route to local model (Person 2's hardware)
-                    response_data = await self.route_to_local_model(msg)
+                privacy_assessment = router.analyze_privacy(msg.prompt, msg.privacy_level.value)
+                execution_location = router.choose_execution_location(privacy_assessment["privacy_level"])
+                response_data = self.generate_local_response(msg, privacy_assessment)
+                if execution_location == "local":
                     self.performance_metrics["local_requests"] += 1
                 else:
-                    # Route to cloud API
-                    response_data = await self.route_to_cloud_model(msg)
                     self.performance_metrics["cloud_requests"] += 1
-                
-                # Step 3: Store conversation context
-                await self.store_conversation_context(msg, response_data)
+
+                node = dag_store.add_node(
+                    conversation_id=msg.conversation_id,
+                    branch_id=msg.branch_id,
+                    parent_id=(msg.context or {}).get("parent_id") if msg.context else None,
+                    prompt=msg.prompt,
+                    response=response_data["response"],
+                    model_used=response_data["model_used"],
+                    execution_location=ExecutionLocation.LOCAL.value,
+                    metadata=response_data["metadata"],
+                )
+                memory_store.store(
+                    context=node,
+                    conversation_id=msg.conversation_id,
+                    branch_id=node.get("branch_id"),
+                )
                 
                 # Step 4: Calculate performance metrics
                 response_time = (time.time() - start_time) * 1000
@@ -121,7 +117,6 @@ class TenetOrchestrator:
                     self.performance_metrics["total_requests"]
                 )
                 
-                # Step 5: Send response back
                 response_data["performance_metrics"] = {
                     "response_time_ms": response_time,
                     "total_requests": self.performance_metrics["total_requests"],
@@ -131,12 +126,11 @@ class TenetOrchestrator:
                 await ctx.send(sender, ChatResponse(**response_data))
                 
             except Exception as e:
-                # Error handling
                 self.performance_metrics["error_count"] += 1
                 error_response = {
                     "response": f"I apologize, but I encountered an error: {str(e)}",
                     "model_used": "error",
-                    "execution_location": ExecutionLocation.CLOUD,
+                    "execution_location": ExecutionLocation.LOCAL,
                     "conversation_id": msg.conversation_id,
                     "branch_id": msg.branch_id,
                     "metadata": {"error": True, "error_type": str(type(e).__name__)},
@@ -149,8 +143,7 @@ class TenetOrchestrator:
             """Handle conversation branching requests"""
             
             try:
-                # Route branch operations to branch manager
-                branch_result = await self.create_branch(msg)
+                branch_result = self.handle_branch_action(msg)
                 
                 response = BranchResponse(
                     success=branch_result["success"],
@@ -174,6 +167,15 @@ class TenetOrchestrator:
                 )
                 await ctx.send(sender, error_response)
     
+    def generate_local_response(self, msg: ChatRequest, privacy_assessment: dict) -> dict:
+        selected_agent = self.select_specialist_agent(msg.prompt, privacy_assessment["privacy_level"])
+        response = (
+            f"Local-only mode response for '{msg.prompt[:80]}'. "
+            "This response is generated without outbound service calls."
+        )
+        return {
+            "response": response,
+            "model_used": self.config.DEFAULT_LOCAL_MODEL,
     async def analyze_privacy(self, msg: ChatRequest) -> dict:
         """Analyze privacy level of the request"""
         
@@ -214,6 +216,31 @@ class TenetOrchestrator:
             "conversation_id": msg.conversation_id,
             "branch_id": msg.branch_id,
             "metadata": {
+                "privacy_level": privacy_assessment["privacy_level"],
+                "route_recommendation": privacy_assessment["recommendation"],
+                "local_only_mode": True,
+                "selected_specialist_agent": selected_agent.get("agent_name") if selected_agent else "tenet-orchestrator",
+            },
+        }
+
+    def select_specialist_agent(self, prompt: str, privacy_level: str) -> dict | None:
+        prompt_lower = prompt.lower()
+        if privacy_level == "sensitive":
+            return capability_registry.find_best_agent("secure_routing")
+        if any(word in prompt_lower for word in ["search", "find", "retrieve"]):
+            return capability_registry.find_best_agent("semantic_search")
+        if any(word in prompt_lower for word in ["branch", "fork", "rollback", "merge"]):
+            return capability_registry.find_best_agent("branch_management")
+        if any(word in prompt_lower for word in ["memory", "context", "recall"]):
+            return capability_registry.find_best_agent("context_management")
+        if any(word in prompt_lower for word in ["model", "load", "unload", "optimize"]):
+            return capability_registry.find_best_agent("model_management")
+        return None
+
+    def handle_branch_action(self, msg: BranchRequest) -> dict:
+        action = msg.action
+        if action in {BranchAction.CREATE, BranchAction.FORK}:
+            branch = dag_store.create_branch(msg.conversation_id, msg.node_id, msg.branch_name)
                 "privacy": "local-execution",
                 "tps": ollama_result["tps"],
             }
@@ -336,11 +363,27 @@ class TenetOrchestrator:
                 
         except Exception as e:
             return {
-                "success": False,
-                "branch_id": "",
-                "node_id": "",
-                "message": f"Failed to create branch: {str(e)}"
+                "success": True,
+                "branch_id": branch["branch_id"],
+                "node_id": branch.get("head_node_id"),
+                "message": "Branch created",
             }
+        if action == BranchAction.LIST:
+            branches = dag_store.list_branches(msg.conversation_id, include_pruned=msg.include_pruned)
+            return {"success": True, "branches": branches, "message": f"Found {len(branches)} branches"}
+        if action == BranchAction.SWITCH:
+            branch = dag_store.switch_branch(msg.conversation_id, msg.branch_id or "")
+            return {"success": True, "branch_id": branch["branch_id"], "message": "Branch switched"}
+        if action == BranchAction.ROLLBACK:
+            branch = dag_store.rollback(msg.conversation_id, msg.branch_id or "", msg.target_node_id or "")
+            return {"success": True, "branch_id": branch["branch_id"], "node_id": branch["head_node_id"], "message": "Rollback complete"}
+        if action == BranchAction.GET_GRAPH:
+            graph = dag_store.get_graph(msg.conversation_id, include_pruned=msg.include_pruned)
+            return {"success": True, "graph": graph, "message": "Graph loaded"}
+        if action == BranchAction.DELETE:
+            ok = dag_store.delete_branch(msg.conversation_id, msg.branch_id or "")
+            return {"success": ok, "message": "Branch pruned" if ok else "Unable to delete branch"}
+        return {"success": False, "message": f"Unsupported action: {action}"}
     
     def run(self):
         """Start the orchestrator agent"""

@@ -3,6 +3,12 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from enum import Enum
 
+
+class ExportTarget(str, Enum):
+    CONVERSATION = "conversation"
+    BRANCH = "branch"
+    NODE = "node"
+
 class ExportFormat(str, Enum):
     JSON = "json"
     MARKDOWN = "markdown"
@@ -12,7 +18,7 @@ class ExportFormat(str, Enum):
 
 class ExportRequest(BaseModel):
     """Request to export conversation data"""
-    target_type: str = Field(..., description="Type: conversation, branch, node")
+    target_type: ExportTarget = Field(..., description="Type: conversation, branch, node")
     target_id: str = Field(..., description="ID of target to export")
     export_format: ExportFormat = Field(default=ExportFormat.MARKDOWN, description="Export format")
     include_metadata: bool = Field(default=True, description="Include metadata")

@@ -1,11 +1,10 @@
 from uagents import Agent, Context
 from protocols.memory_protocol import (
-    MemoryRequest, MemoryResponse, ContextData, memory_protocol
+    MemoryRequest, MemoryResponse, ContextData, memory_protocol, MemoryAction
 )
 from config.agent_config import AgentConfig
-import httpx
 import time
-import json
+from utils.local_runtime import memory_store
 
 class TenetContextKeeper:
     """Maintains conversation context and memory"""
@@ -35,15 +34,15 @@ class TenetContextKeeper:
             """Handle memory operations"""
             
             try:
-                if msg.action == "store":
+                if msg.action == MemoryAction.STORE:
                     response = await self.store_context(msg)
-                elif msg.action == "retrieve":
+                elif msg.action == MemoryAction.RETRIEVE:
                     response = await self.retrieve_context(msg)
-                elif msg.action == "search":
+                elif msg.action == MemoryAction.SEARCH:
                     response = await self.search_context(msg)
-                elif msg.action == "delete":
+                elif msg.action == MemoryAction.DELETE:
                     response = await self.delete_context(msg)
-                elif msg.action == "promote":
+                elif msg.action == MemoryAction.PROMOTE:
                     response = await self.promote_context(msg)
                 else:
                     response = {
@@ -92,35 +91,24 @@ class TenetContextKeeper:
                 oldest_key = next(iter(self.context_cache))
                 del self.context_cache[oldest_key]
             
-            # Store in backend database
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/memory/store",
-                    json=context_data.dict(),
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "success": True,
-                    "action": "store",
-                    "context": context_data.dict(),
-                    "results": None,
-                    "message": "Context stored successfully"
-                }
-                
+            memory_store.store(context_data.dict(), msg.conversation_id, msg.branch_id)
+            return {
+                "success": True,
+                "action": MemoryAction.STORE,
+                "context": context_data.dict(),
+                "results": None,
+                "message": "Context stored successfully"
+            }
         except Exception as e:
-            # Store locally if backend fails
             cache_key = f"{msg.conversation_id}_{msg.branch_id}"
             self.context_cache[cache_key] = msg.context
             
             return {
                 "success": True,
-                "action": "store",
+                "action": MemoryAction.STORE,
                 "context": msg.context,
                 "results": None,
-                "message": f"Context stored locally (backend unavailable): {str(e)}"
+                "message": f"Context stored in cache: {str(e)}"
             }
     
     async def retrieve_context(self, msg: MemoryRequest) -> dict:
@@ -138,28 +126,19 @@ class TenetContextKeeper:
                     "message": "Context retrieved from cache"
                 }
             
-            # Retrieve from backend
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.config.BACKEND_API_URL}/api/memory/{msg.conversation_id}",
-                    params={"branch_id": msg.branch_id} if msg.branch_id else {},
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "success": True,
-                    "action": "retrieve",
-                    "context": result.get("context"),
-                    "results": None,
-                    "message": "Context retrieved successfully"
-                }
+            context = memory_store.retrieve(msg.conversation_id, msg.branch_id)
+            return {
+                "success": context is not None,
+                "action": MemoryAction.RETRIEVE,
+                "context": context,
+                "results": None,
+                "message": "Context retrieved successfully" if context else "No context found"
+            }
                 
         except Exception as e:
             return {
                 "success": False,
-                "action": "retrieve",
+                "action": MemoryAction.RETRIEVE,
                 "context": None,
                 "results": None,
                 "message": f"Failed to retrieve context: {str(e)}"
@@ -169,47 +148,21 @@ class TenetContextKeeper:
         """Search conversation context"""
         
         try:
-            # Search in backend
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/memory/search",
-                    json={
-                        "query": msg.query,
-                        "conversation_id": msg.conversation_id,
-                        "branch_id": msg.branch_id,
-                        "limit": msg.limit
-                    },
-                    timeout=15.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "success": True,
-                    "action": "search",
-                    "context": None,
-                    "results": result.get("results", []),
-                    "message": f"Found {len(result.get('results', []))} matching contexts"
-                }
-                
-        except Exception as e:
-            # Simple local search as fallback
-            local_results = []
-            query_lower = msg.query.lower()
-            
-            for context in self.context_cache.values():
-                context_str = json.dumps(context).lower()
-                if query_lower in context_str:
-                    local_results.append(context)
-                    if len(local_results) >= msg.limit:
-                        break
-            
+            results = memory_store.search(msg.query or "", msg.conversation_id, msg.branch_id, msg.limit or 10)
             return {
                 "success": True,
-                "action": "search",
+                "action": MemoryAction.SEARCH,
                 "context": None,
-                "results": local_results,
-                "message": f"Found {len(local_results)} matching contexts (local search)"
+                "results": results,
+                "message": f"Found {len(results)} matching contexts"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "action": MemoryAction.SEARCH,
+                "context": None,
+                "results": [],
+                "message": f"Search failed: {str(e)}"
             }
     
     async def delete_context(self, msg: MemoryRequest) -> dict:
@@ -221,27 +174,19 @@ class TenetContextKeeper:
             if cache_key in self.context_cache:
                 del self.context_cache[cache_key]
             
-            # Delete from backend
-            async with httpx.AsyncClient() as client:
-                response = await client.delete(
-                    f"{self.config.BACKEND_API_URL}/api/memory/{msg.conversation_id}",
-                    params={"branch_id": msg.branch_id} if msg.branch_id else {},
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                
-                return {
-                    "success": True,
-                    "action": "delete",
-                    "context": None,
-                    "results": None,
-                    "message": "Context deleted successfully"
-                }
+            removed = memory_store.delete(msg.conversation_id, msg.branch_id)
+            return {
+                "success": True,
+                "action": MemoryAction.DELETE,
+                "context": None,
+                "results": None,
+                "message": f"Deleted {removed} context entries"
+            }
                 
         except Exception as e:
             return {
                 "success": False,
-                "action": "delete",
+                "action": MemoryAction.DELETE,
                 "context": None,
                 "results": None,
                 "message": f"Failed to delete context: {str(e)}"
@@ -251,31 +196,19 @@ class TenetContextKeeper:
         """Promote important context to long-term memory"""
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/memory/promote",
-                    json={
-                        "conversation_id": msg.conversation_id,
-                        "branch_id": msg.branch_id,
-                        "limit": msg.limit
-                    },
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "success": True,
-                    "action": "promote",
-                    "context": result.get("context"),
-                    "results": None,
-                    "message": "Context promoted successfully"
-                }
+            promoted = memory_store.promote(msg.conversation_id, msg.branch_id, msg.limit or 10)
+            return {
+                "success": True,
+                "action": MemoryAction.PROMOTE,
+                "context": promoted[0] if promoted else None,
+                "results": promoted,
+                "message": "Context promoted successfully"
+            }
                 
         except Exception as e:
             return {
                 "success": False,
-                "action": "promote",
+                "action": MemoryAction.PROMOTE,
                 "context": None,
                 "results": None,
                 "message": f"Failed to promote context: {str(e)}"

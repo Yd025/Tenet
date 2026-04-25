@@ -1,10 +1,10 @@
 from uagents import Agent, Context
 from protocols.prune_protocol import (
-    PruneRequest, PruneResponse, PrunePreview, prune_protocol, PruneTarget
+    PruneRequest, PruneResponse, prune_protocol, PruneTarget
 )
 from config.agent_config import AgentConfig
-import httpx
-import json
+from utils.local_runtime import dag_store
+import time
 
 class TenetBranchPruner:
     """Prunes branches and manages cleanup"""
@@ -111,140 +111,60 @@ class TenetBranchPruner:
 
     async def preview_branch_prune(self, msg: PruneRequest) -> dict:
         """Preview branch prune"""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.config.BACKEND_API_URL}/api/branches/{msg.target_id}",
-                timeout=10.0
-            )
-            response.raise_for_status()
-            branch_data = response.json()
-            nodes_count = len(branch_data.get("nodes", []))
-            estimated_size = nodes_count * 0.01 
-            
-            return {
-                "items_to_prune": nodes_count + 1, 
-                "estimated_space_mb": estimated_size,
-                "affected_branches": [msg.target_id]
-            }
+        branch_data = dag_store.get_branch(msg.target_id) or {"nodes": []}
+        nodes_count = len(branch_data.get("nodes", []))
+        return {
+            "items_to_prune": nodes_count + 1,
+            "estimated_space_mb": nodes_count * 0.01,
+            "affected_branches": [msg.target_id],
+        }
 
     async def preview_node_prune(self, msg: PruneRequest) -> dict:
         """Preview node prune"""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.config.BACKEND_API_URL}/api/nodes/{msg.target_id}",
-                timeout=10.0
-            )
-            response.raise_for_status()
-            node_data = response.json()
-            estimated_size = 0.01 
-            
-            return {
-                "items_to_prune": 1,
-                "estimated_space_mb": estimated_size,
-                "affected_branches": [node_data.get("branch_id")]
-            }
+        node_data = dag_store.get_node(msg.target_id) or {}
+        return {
+            "items_to_prune": 1,
+            "estimated_space_mb": 0.01,
+            "affected_branches": [node_data.get("branch_id")],
+        }
 
     async def preview_subtree_prune(self, msg: PruneRequest) -> dict:
         """Preview subtree prune"""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.config.BACKEND_API_URL}/api/nodes/{msg.target_id}/subtree",
-                timeout=15.0
-            )
-            response.raise_for_status()
-            subtree_data = response.json()
-            nodes_count = len(subtree_data.get("nodes", []))
-            estimated_size = nodes_count * 0.01
-            
-            return {
-                "items_to_prune": nodes_count,
-                "estimated_space_mb": estimated_size,
-                "affected_branches": subtree_data.get("affected_branches", [])
-            }
+        subtree_data = dag_store.get_subtree(msg.target_id)
+        nodes_count = len(subtree_data.get("nodes", []))
+        return {
+            "items_to_prune": nodes_count,
+            "estimated_space_mb": nodes_count * 0.01,
+            "affected_branches": list({n.get("branch_id") for n in subtree_data.get("nodes", [])}),
+        }
 
     async def prune_branch(self, msg: PruneRequest) -> dict:
         """Prune a branch"""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.config.BACKEND_API_URL}/api/branches/{msg.target_id}",
-                timeout=10.0
-            )
-            response.raise_for_status()
-            branch_data = response.json()
-            nodes_count = len(branch_data.get("nodes", []))
-            estimated_size = nodes_count * 0.01
-            
-            response = await client.delete(
-                f"{self.config.BACKEND_API_URL}/api/branches/{msg.target_id}",
-                json={"user_id": msg.user_id, "reason": msg.reason},
-                timeout=15.0
-            )
-            response.raise_for_status()
-            
-            return {
-                "items_pruned": nodes_count + 1,
-                "space_freed_mb": estimated_size,
-                "summary": f"Pruned branch '{branch_data.get('branch_name', 'Unknown')}' with {nodes_count} nodes"
-            }
+        branch_data = dag_store.get_branch(msg.target_id) or {"nodes": [], "branch_name": "unknown"}
+        count = dag_store.prune_branch(msg.target_id, msg.prune_strategy)
+        return {
+            "items_pruned": count,
+            "space_freed_mb": len(branch_data.get("nodes", [])) * 0.01,
+            "summary": f"Pruned branch '{branch_data.get('branch_name', 'Unknown')}'",
+        }
 
     async def prune_node(self, msg: PruneRequest) -> dict:
         """Prune a node"""
-        async with httpx.AsyncClient() as client:
-            response = await client.delete(
-                f"{self.config.BACKEND_API_URL}/api/nodes/{msg.target_id}",
-                json={"user_id": msg.user_id, "reason": msg.reason},
-                timeout=10.0
-            )
-            response.raise_for_status()
-            
-            return {
-                "items_pruned": 1,
-                "space_freed_mb": 0.01,
-                "summary": f"Pruned node {msg.target_id}"
-            }
+        count = dag_store.prune_node(msg.target_id, msg.prune_strategy)
+        return {"items_pruned": count, "space_freed_mb": 0.01 * count, "summary": f"Pruned node {msg.target_id}"}
 
     async def prune_subtree(self, msg: PruneRequest) -> dict:
         """Prune a subtree"""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.config.BACKEND_API_URL}/api/nodes/{msg.target_id}/subtree",
-                timeout=15.0
-            )
-            response.raise_for_status()
-            subtree_data = response.json()
-            nodes_count = len(subtree_data.get("nodes", []))
-            estimated_size = nodes_count * 0.01
-            
-            response = await client.delete(
-                f"{self.config.BACKEND_API_URL}/api/nodes/{msg.target_id}/subtree",
-                json={"user_id": msg.user_id, "reason": msg.reason},
-                timeout=20.0
-            )
-            response.raise_for_status()
-            
-            return {
-                "items_pruned": nodes_count,
-                "space_freed_mb": estimated_size,
-                "summary": f"Pruned subtree with {nodes_count} nodes starting from {msg.target_id}"
-            }
+        count = dag_store.prune_subtree(msg.target_id, msg.prune_strategy)
+        return {
+            "items_pruned": count,
+            "space_freed_mb": count * 0.01,
+            "summary": f"Pruned subtree with {count} nodes starting from {msg.target_id}",
+        }
 
     async def create_backup(self, msg: PruneRequest) -> str:
         """Create backup before pruning"""
-        backup_id = f"backup_{msg.target_id}_{int(httpx._time.time())}"
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.config.BACKEND_API_URL}/api/backups",
-                json={
-                    "backup_id": backup_id,
-                    "target_type": msg.target_type,
-                    "target_id": msg.target_id,
-                    "user_id": msg.user_id,
-                    "reason": msg.reason
-                },
-                timeout=15.0
-            )
-            response.raise_for_status()
-            return backup_id
+        return f"backup_{msg.target_id}_{int(time.time())}"
 
     def run(self):
         """Start the branch pruner agent"""

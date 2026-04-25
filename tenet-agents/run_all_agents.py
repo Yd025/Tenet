@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import signal
+import os
 from pathlib import Path
 
 # Agent configurations
@@ -39,6 +40,90 @@ AGENTS = [
         "script": "agents/context_keeper_agent.py",
         "port": 8005,
         "color": "🧠"
+    },
+    {
+        "name": "Branch Summarizer",
+        "script": "agents/branch_summarizer_agent.py",
+        "port": 8006,
+        "color": "📝"
+    },
+    {
+        "name": "Branch Merger",
+        "script": "agents/branch_merger_agent.py",
+        "port": 8007,
+        "color": "🔀"
+    },
+    {
+        "name": "Branch Pruner",
+        "script": "agents/branch_pruner_agent.py",
+        "port": 8008,
+        "color": "✂️"
+    },
+    {
+        "name": "Node Pruner",
+        "script": "agents/node_pruner_agent.py",
+        "port": 8009,
+        "color": "🔪"
+    },
+    {
+        "name": "Semantic Search",
+        "script": "agents/semantic_search_agent.py",
+        "port": 8010,
+        "color": "🔍"
+    },
+    {
+        "name": "Conversation Exporter",
+        "script": "agents/conversation_exporter_agent.py",
+        "port": 8011,
+        "color": "📤"
+    },
+    {
+        "name": "Tag Manager",
+        "script": "agents/tag_manager_agent.py",
+        "port": 8012,
+        "color": "🏷️"
+    },
+    {
+        "name": "Rollback Agent",
+        "script": "agents/rollback_agent.py",
+        "port": 8013,
+        "color": "⏪"
+    },
+    {
+        "name": "Diff Viewer",
+        "script": "agents/diff_viewer_agent.py",
+        "port": 8014,
+        "color": "🧾"
+    },
+    {
+        "name": "Branch Comparator",
+        "script": "agents/branch_comparator_agent.py",
+        "port": 8015,
+        "color": "🧮"
+    },
+    {
+        "name": "Storage Optimizer",
+        "script": "agents/storage_optimizer_agent.py",
+        "port": 8016,
+        "color": "🧹"
+    },
+    {
+        "name": "Resource Monitor",
+        "script": "agents/resource_monitor_agent.py",
+        "port": 8017,
+        "color": "📊"
+    },
+    {
+        "name": "Graph Integrity",
+        "script": "agents/graph_integrity_agent.py",
+        "port": 8018,
+        "color": "🕸️"
+    },
+    {
+        "name": "Capability Registry",
+        "script": "agents/capability_registry_agent.py",
+        "port": 8019,
+        "color": "🗂️"
     }
 ]
 
@@ -55,12 +140,21 @@ class AgentManager:
         if not script_path.exists():
             print(f"❌ Script not found: {script_path}")
             return None
+        package_root = Path(__file__).resolve().parent
+        module_name = agent_config["script"].replace("/", ".").removesuffix(".py")
+        env = dict(os.environ)
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{package_root}:{existing_pythonpath}" if existing_pythonpath else str(package_root)
+        )
         
         process = subprocess.Popen(
-            [sys.executable, str(script_path)],
+            [sys.executable, "-m", module_name],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
+            cwd=str(package_root),
+            env=env,
         )
         
         return process

@@ -1,10 +1,17 @@
 from uagents.protocol import Protocol
 from pydantic import BaseModel, Field
 from typing import Optional, List
+from enum import Enum
+
+
+class SummaryTarget(str, Enum):
+    BRANCH = "branch"
+    CONVERSATION = "conversation"
+    NODE = "node"
 
 class SummaryRequest(BaseModel):
     """Request for branch/conversation summarization"""
-    target_type: str = Field(..., description="Type: branch, conversation, node")
+    target_type: SummaryTarget = Field(..., description="Type: branch, conversation, node")
     target_id: str = Field(..., description="ID of target to summarize")
     summary_length: str = Field(default="medium", description="Length: short, medium, long")
     include_metadata: bool = Field(default=True, description="Include metadata in summary")
