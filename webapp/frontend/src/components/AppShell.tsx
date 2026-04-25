@@ -3,15 +3,7 @@ import { useParams } from 'react-router-dom';
 import { useConversationStore } from '../store/useConversationStore';
 import Sidebar from './Sidebar';
 import TopNav from './TopNav';
-
-// Placeholder views — will be replaced in later steps
-function ChatView() {
-  return (
-    <div className="flex-1 flex items-center justify-center bg-tenet-bg">
-      <span className="text-gray-500 text-sm">Chat View</span>
-    </div>
-  );
-}
+import ChatView from '../views/ChatView';
 
 function BranchHistoryView({ setActiveTab }: { setActiveTab: (tab: 'chats' | 'branch-history') => void }) {
   return (
@@ -54,7 +46,7 @@ export default function AppShell() {
           setSelectedModel={setSelectedModel}
         />
         {activeTab === 'chats' ? (
-          <ChatView />
+          <ChatView selectedModel={selectedModel} />
         ) : (
           <BranchHistoryView setActiveTab={setActiveTab} />
         )}
