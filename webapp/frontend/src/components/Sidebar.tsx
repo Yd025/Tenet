@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { Plus, MessageSquare } from 'lucide-react';
 import { useConversationStore } from '../store/useConversationStore';
+import GX10TelemetryWidget from './GX10TelemetryWidget';
 
 export default function Sidebar() {
   const navigate = useNavigate();
@@ -58,9 +59,9 @@ export default function Sidebar() {
         })}
       </div>
 
-      {/* Bottom widget placeholder */}
+      {/* Bottom widget */}
       <div className="mt-auto">
-        <div className="px-4 py-3 text-xs text-gray-600">GX10 Widget Placeholder</div>
+        <GX10TelemetryWidget />
       </div>
     </div>
   );
