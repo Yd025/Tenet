@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import signal
+import os
 from pathlib import Path
 
 # Agent configurations
@@ -139,12 +140,21 @@ class AgentManager:
         if not script_path.exists():
             print(f"❌ Script not found: {script_path}")
             return None
+        package_root = Path(__file__).resolve().parent
+        module_name = agent_config["script"].replace("/", ".").removesuffix(".py")
+        env = dict(os.environ)
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{package_root}:{existing_pythonpath}" if existing_pythonpath else str(package_root)
+        )
         
         process = subprocess.Popen(
-            [sys.executable, str(script_path)],
+            [sys.executable, "-m", module_name],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
+            cwd=str(package_root),
+            env=env,
         )
         
         return process

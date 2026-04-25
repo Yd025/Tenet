@@ -2,3 +2,5 @@ uagents
 fetchai
 httpx
 pydantic
+fastapi
+uvicorn

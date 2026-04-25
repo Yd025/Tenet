@@ -67,6 +67,51 @@ cd tenet-agents
 ../.venv/bin/python -m pytest tests/test_local_smoke.py
 ```
 
+## Agentverse Gateway + Inspectors
+
+```bash
+cd tenet-agents
+../.venv/bin/python gateway_agent.py
+```
+
+- HTTP gateway endpoint: `http://localhost:9000/process`
+- Gateway uAgent port: `9020`
+
+Register helper:
+
+```bash
+cd tenet-agents
+../.venv/bin/python register_agent.py
+```
+
+Start local agents with health check:
+
+```bash
+cd tenet-agents
+../.venv/bin/python start_all_agents.py
+```
+
+Gateway connectivity smoke test:
+
+```bash
+cd tenet-agents
+../.venv/bin/python test_gateway_connection.py
+```
+
+Web inspector:
+
+```bash
+cd tenet-agents
+../.venv/bin/python inspector_agent.py
+```
+
+CLI inspector:
+
+```bash
+cd tenet-agents
+../.venv/bin/python cli_inspector.py
+```
+
 ## Notes
 
 - `ExecutionLocation` is still part of contracts, but local-only policy forces local execution.
