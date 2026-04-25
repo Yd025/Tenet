@@ -1,67 +1,56 @@
-import { useCallback } from 'react';
-import ReactFlow, {
-  Background,
-  Controls,
-  ReactFlowProvider,
-} from 'reactflow';
-import type { Node, Edge } from 'reactflow';
-import 'reactflow/dist/style.css';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { stratify, tree as d3Tree } from 'd3-hierarchy';
+import type { HierarchyPointNode } from 'd3-hierarchy';
+import { zoom as d3Zoom, zoomIdentity } from 'd3-zoom';
+import { select } from 'd3-selection';
 
 import { useConversationStore } from '../store/useConversationStore';
 import { fetchMerge } from '../api/client';
 import type { ConversationNode } from '../types';
-import ConversationNodeComponent from '../components/ConversationNode';
+import ConversationNodeSVG from '../components/ConversationNode';
 import type { ConversationNodeData } from '../components/ConversationNode';
 
+// ---------------------------------------------------------------------------
+// Props
+// ---------------------------------------------------------------------------
 interface BranchHistoryViewProps {
   setActiveTab: (tab: 'chats' | 'branch-history') => void;
 }
 
-const nodeTypes = { conversationNode: ConversationNodeComponent };
-
 // ---------------------------------------------------------------------------
 // Layout constants
 // ---------------------------------------------------------------------------
-const Y_STEP = 110;
-const Y_START = 60;
-const TRUNK_X = 160;
-const BRANCH_BASE_X = 420;
-const BRANCH_X_GAP = 220;
+const NODE_H_SPACING = 180;
+const NODE_V_SPACING = 90;
 
 // ---------------------------------------------------------------------------
-// Graph builder — layer-based layout (no node overlap)
+// Hierarchy builder
 // ---------------------------------------------------------------------------
-function buildFlowGraph(
+
+interface TreeDatum {
+  id: string;
+  parentId: string | null;
+  node: ConversationNode;
+}
+
+function buildTreeData(
   storeNodes: Record<string, ConversationNode>,
-  headNodeId: string | null,
-  selectedNodeIds: string[],
-  handlers: {
-    onCheckout: (id: string) => void;
-    onBranch: (id: string) => void;
-    onPrune: (id: string) => void;
-    onSelect: (id: string) => void;
-  },
-): { nodes: Node[]; edges: Edge[] } {
-  // Filter pruned, sort by timestamp so parents are always processed before children
+): TreeDatum[] {
+  const active = Object.values(storeNodes).filter((n) => !n.pruned);
+  return active.map((n) => ({
+    id: n.node_id,
+    parentId: n.parent_id,
+    node: n,
+  }));
+}
+
+function buildLabels(
+  storeNodes: Record<string, ConversationNode>,
+): { labelMap: Record<string, string>; sublabelMap: Record<string, string> } {
   const activeNodes = Object.values(storeNodes)
     .filter((n) => !n.pruned)
     .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-  // --- Layer assignment: depth from root ---
-  // Each node's layer = max(parent_layer, merge_parent_layer) + 1
-  const layerMap: Record<string, number> = {};
-  for (const node of activeNodes) {
-    let layer = 0;
-    if (node.parent_id && layerMap[node.parent_id] !== undefined) {
-      layer = Math.max(layer, layerMap[node.parent_id] + 1);
-    }
-    if (node.merge_parent_id && layerMap[node.merge_parent_id] !== undefined) {
-      layer = Math.max(layer, layerMap[node.merge_parent_id] + 1);
-    }
-    layerMap[node.node_id] = layer;
-  }
-
-  // --- Labels ---
   let trunkCount = 0;
   let branchCount = 0;
   const labelMap: Record<string, string> = {};
@@ -76,7 +65,7 @@ function buildFlowGraph(
     } else if (node.is_merge_node) {
       trunkCount += 1;
       labelMap[node.node_id] = `v${trunkCount}`;
-      sublabelMap[node.node_id] = '⎇ Merge';
+      sublabelMap[node.node_id] = '\u238B Merge';
     } else {
       trunkCount += 1;
       labelMap[node.node_id] = `v${trunkCount}`;
@@ -84,101 +73,26 @@ function buildFlowGraph(
     }
   }
 
-  // --- Position assignment ---
-  // Y = layer * Y_STEP (single global counter — no collisions)
-  // X = TRUNK_X for trunk nodes; BRANCH_BASE_X + col*gap for branch nodes
-  // Multiple branch nodes in the same layer get staggered right
-  const posMap: Record<string, { x: number; y: number }> = {};
-  const branchColAtLayer: Record<number, number> = {};
-
-  for (const node of activeNodes) {
-    const layer = layerMap[node.node_id] ?? 0;
-    const y = Y_START + layer * Y_STEP;
-    const isBranch = node.branch_label !== null || node.is_merge_node;
-
-    if (isBranch) {
-      const col = branchColAtLayer[layer] ?? 0;
-      branchColAtLayer[layer] = col + 1;
-      posMap[node.node_id] = { x: BRANCH_BASE_X + col * BRANCH_X_GAP, y };
-    } else {
-      posMap[node.node_id] = { x: TRUNK_X, y };
-    }
-  }
-
-  // --- Flow nodes ---
-  const flowNodes: Node[] = activeNodes.map((node) => {
-    const data: ConversationNodeData = {
-      label: labelMap[node.node_id] ?? node.node_id.slice(0, 8),
-      sublabel: sublabelMap[node.node_id] ?? '',
-      isHead: node.node_id === headNodeId,
-      isBranch: node.branch_label !== null,
-      isMerge: node.is_merge_node,
-      isSelected: selectedNodeIds.includes(node.node_id),
-      nodeId: node.node_id,
-      ...handlers,
-    };
-    return {
-      id: node.node_id,
-      type: 'conversationNode',
-      position: posMap[node.node_id] ?? { x: TRUNK_X, y: Y_START },
-      data,
-    };
-  });
-
-  // --- Flow edges ---
-  // Trunk→trunk: straight down  (source bottom → target top)
-  // Trunk→branch: curve right   (source right  → target left)
-  // Branch→branch: straight down (source bottom → target top)
-  const flowEdges: Edge[] = [];
-
-  for (const node of activeNodes) {
-    if (node.parent_id && storeNodes[node.parent_id] && !storeNodes[node.parent_id].pruned) {
-      const parentNode = storeNodes[node.parent_id];
-      const parentIsTrunk = !parentNode.branch_label && !parentNode.is_merge_node;
-      const thisIsBranch = node.branch_label !== null || node.is_merge_node;
-      const forkEdge = parentIsTrunk && thisIsBranch;
-
-      flowEdges.push({
-        id: `e-${node.parent_id}-${node.node_id}`,
-        source: node.parent_id,
-        target: node.node_id,
-        sourceHandle: forkEdge ? 'right' : 'bottom',
-        targetHandle: forkEdge ? 'left' : 'top',
-        type: 'smoothstep',
-        animated: false,
-        style: thisIsBranch
-          ? { stroke: '#7c3aed', strokeWidth: 1.5, strokeDasharray: '6 3', opacity: 0.7 }
-          : { stroke: '#2DD4BF', strokeWidth: 1.5, opacity: 0.35 },
-      });
-    }
-
-    // Merge second-parent edge
-    if (
-      node.is_merge_node &&
-      node.merge_parent_id &&
-      storeNodes[node.merge_parent_id] &&
-      !storeNodes[node.merge_parent_id].pruned
-    ) {
-      flowEdges.push({
-        id: `e-merge-${node.merge_parent_id}-${node.node_id}`,
-        source: node.merge_parent_id,
-        target: node.node_id,
-        sourceHandle: 'bottom',
-        targetHandle: 'left',
-        type: 'smoothstep',
-        animated: false,
-        style: { stroke: '#7c3aed', strokeWidth: 1.5, strokeDasharray: '6 3', opacity: 0.7 },
-      });
-    }
-  }
-
-  return { nodes: flowNodes, edges: flowEdges };
+  return { labelMap, sublabelMap };
 }
 
 // ---------------------------------------------------------------------------
-// Inner component (needs ReactFlowProvider context)
+// Curved link path generator (vertical orientation)
 // ---------------------------------------------------------------------------
-function BranchHistoryInner({ setActiveTab }: BranchHistoryViewProps) {
+function linkPath(
+  sx: number,
+  sy: number,
+  tx: number,
+  ty: number,
+): string {
+  const midY = (sy + ty) / 2;
+  return `M${sx},${sy} C${sx},${midY} ${tx},${midY} ${tx},${ty}`;
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewProps) {
   const storeNodes = useConversationStore((s) => s.nodes);
   const headNodeId = useConversationStore((s) => s.headNodeId);
   const selectedNodeIds = useConversationStore((s) => s.selectedNodeIds);
@@ -189,24 +103,158 @@ function BranchHistoryInner({ setActiveTab }: BranchHistoryViewProps) {
   const mergeNodes = useConversationStore((s) => s.mergeNodes);
   const clearMergeSelection = useConversationStore((s) => s.clearMergeSelection);
 
-  const handlers = {
-    onCheckout: useCallback((id: string) => checkoutNode(id), [checkoutNode]),
-    onBranch: useCallback(
-      (id: string) => { branchFromNode(id, 'New Branch'); clearMergeSelection(); },
-      [branchFromNode, clearMergeSelection],
-    ),
-    onPrune: useCallback((id: string) => pruneNode(id), [pruneNode]),
-    onSelect: useCallback((id: string) => selectNodeForMerge(id), [selectNodeForMerge]),
-  };
+  const svgRef = useRef<SVGSVGElement>(null);
+  const gRef = useRef<SVGGElement>(null);
 
-  const { nodes: builtNodes, edges: builtEdges } = buildFlowGraph(
-    storeNodes,
-    headNodeId,
-    selectedNodeIds,
-    handlers,
+  // Context menu state
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
+  const ctxMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close context menu on outside click
+  useEffect(() => {
+    if (!ctxMenu) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (ctxMenuRef.current && !ctxMenuRef.current.contains(e.target as Node)) {
+        setCtxMenu(null);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [ctxMenu]);
+
+  const handlers = useMemo(
+    () => ({
+      onCheckout: checkoutNode,
+      onBranch: (id: string) => {
+        branchFromNode(id, 'New Branch');
+        clearMergeSelection();
+      },
+      onPrune: pruneNode,
+      onSelect: selectNodeForMerge,
+    }),
+    [checkoutNode, branchFromNode, pruneNode, selectNodeForMerge, clearMergeSelection],
   );
 
+  // ---------------------------------------------------------------------------
+  // D3 hierarchy layout
+  // ---------------------------------------------------------------------------
+  const { layoutNodes, mergeEdges } = useMemo(() => {
+    const treeData = buildTreeData(storeNodes);
+    if (treeData.length === 0) {
+      return { layoutNodes: [] as HierarchyPointNode<TreeDatum>[], mergeEdges: [] as { source: HierarchyPointNode<TreeDatum>; target: HierarchyPointNode<TreeDatum> }[] };
+    }
+
+    // Orphan guard: ensure every parentId points to an active node
+    const activeIds = new Set(treeData.map((d) => d.id));
+    const cleaned = treeData.map((d) => ({
+      ...d,
+      parentId: d.parentId && activeIds.has(d.parentId) ? d.parentId : null,
+    }));
+
+    // Ensure exactly one root
+    const roots = cleaned.filter((d) => d.parentId === null);
+    if (roots.length === 0) return { layoutNodes: [], mergeEdges: [] };
+
+    // If multiple roots, attach extras to first root
+    if (roots.length > 1) {
+      const primaryRoot = roots[0];
+      for (let i = 1; i < roots.length; i++) {
+        const orphan = cleaned.find((d) => d.id === roots[i].id);
+        if (orphan) orphan.parentId = primaryRoot.id;
+      }
+    }
+
+    const stratifier = stratify<TreeDatum>()
+      .id((d) => d.id)
+      .parentId((d) => d.parentId);
+
+    const root = stratifier(cleaned);
+    const layout = d3Tree<TreeDatum>().nodeSize([NODE_H_SPACING, NODE_V_SPACING]);
+    const laidOut = layout(root);
+
+    const nodes = laidOut.descendants();
+
+    // Build merge edges (not part of tree hierarchy)
+    const nodeById = new Map(nodes.map((n) => [n.data.id, n]));
+    const mEdges: { source: HierarchyPointNode<TreeDatum>; target: HierarchyPointNode<TreeDatum> }[] = [];
+    for (const n of nodes) {
+      const mergeParentId = n.data.node.merge_parent_id;
+      if (mergeParentId && nodeById.has(mergeParentId)) {
+        mEdges.push({ source: nodeById.get(mergeParentId)!, target: n });
+      }
+    }
+
+    return { layoutNodes: nodes, mergeEdges: mEdges };
+  }, [storeNodes]);
+
+  const { labelMap, sublabelMap } = useMemo(() => buildLabels(storeNodes), [storeNodes]);
+
+  // ---------------------------------------------------------------------------
+  // Zoom setup
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const svg = svgRef.current;
+    const g = gRef.current;
+    if (!svg || !g) return;
+
+    const zoomBehavior = d3Zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.1, 4])
+      .on('zoom', (event) => {
+        select(g).attr('transform', event.transform.toString());
+      });
+
+    const svgSel = select(svg);
+    svgSel.call(zoomBehavior);
+
+    // Fit view on data change
+    if (layoutNodes.length > 0) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const n of layoutNodes) {
+        if (n.x < minX) minX = n.x;
+        if (n.x > maxX) maxX = n.x;
+        if (n.y < minY) minY = n.y;
+        if (n.y > maxY) maxY = n.y;
+      }
+
+      const padding = 80;
+      const treeWidth = maxX - minX + padding * 2;
+      const treeHeight = maxY - minY + padding * 2;
+
+      const svgRect = svg.getBoundingClientRect();
+      const svgW = svgRect.width || 800;
+      const svgH = svgRect.height || 600;
+
+      const scale = Math.min(svgW / treeWidth, svgH / treeHeight, 1.5);
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const tx = svgW / 2 - cx * scale;
+      const ty = svgH / 2 - cy * scale;
+
+      svgSel.call(
+        zoomBehavior.transform,
+        zoomIdentity.translate(tx, ty).scale(scale),
+      );
+    }
+
+    return () => {
+      svgSel.on('.zoom', null);
+    };
+  }, [layoutNodes]);
+
+  // ---------------------------------------------------------------------------
+  // Context menu handler (from SVG node)
+  // ---------------------------------------------------------------------------
+  const handleNodeContextMenu = useCallback(
+    (e: React.MouseEvent, nodeId: string) => {
+      e.preventDefault();
+      setCtxMenu({ x: e.clientX, y: e.clientY, nodeId });
+    },
+    [],
+  );
+
+  // ---------------------------------------------------------------------------
   // Floating action bar handlers
+  // ---------------------------------------------------------------------------
   async function handleMerge() {
     if (selectedNodeIds.length !== 2) return;
     const [a, b] = selectedNodeIds;
@@ -224,6 +272,9 @@ function BranchHistoryInner({ setActiveTab }: BranchHistoryViewProps) {
     clearMergeSelection();
   }
 
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
   return (
     <div className="flex-1 flex flex-col relative" style={{ background: '#0B0B0C' }}>
       {/* Back button */}
@@ -232,23 +283,105 @@ function BranchHistoryInner({ setActiveTab }: BranchHistoryViewProps) {
           onClick={() => setActiveTab('chats')}
           className="text-xs text-tenet-teal underline hover:opacity-80 transition-opacity"
         >
-          ← Back to Chats
+          &larr; Back to Chats
         </button>
       </div>
 
-      {/* React Flow canvas */}
-      <div className="flex-1">
-        <ReactFlow
-          nodes={builtNodes}
-          edges={builtEdges}
-          nodeTypes={nodeTypes}
-          nodesDraggable={false}
-          fitView
+      {/* SVG canvas */}
+      <svg
+        ref={svgRef}
+        className="flex-1 w-full h-full"
+        style={{ minHeight: 0 }}
+      >
+        <g ref={gRef}>
+          {/* Tree links */}
+          {layoutNodes.map((node) => {
+            if (!node.parent) return null;
+            const isBranch =
+              node.data.node.branch_label !== null || node.data.node.is_merge_node;
+            return (
+              <path
+                key={`link-${node.data.id}`}
+                d={linkPath(node.parent.x, node.parent.y, node.x, node.y)}
+                fill="none"
+                stroke={isBranch ? '#7c3aed' : '#2DD4BF'}
+                strokeWidth={1.5}
+                strokeDasharray={isBranch ? '6 3' : undefined}
+                opacity={isBranch ? 0.7 : 0.35}
+              />
+            );
+          })}
+
+          {/* Merge links */}
+          {mergeEdges.map((edge) => (
+            <path
+              key={`merge-${edge.source.data.id}-${edge.target.data.id}`}
+              d={linkPath(edge.source.x, edge.source.y, edge.target.x, edge.target.y)}
+              fill="none"
+              stroke="#7c3aed"
+              strokeWidth={1.5}
+              strokeDasharray="6 3"
+              opacity={0.7}
+            />
+          ))}
+
+          {/* Nodes */}
+          {layoutNodes.map((node) => {
+            const d = node.data.node;
+            const nodeData: ConversationNodeData = {
+              label: labelMap[d.node_id] ?? d.node_id.slice(0, 8),
+              sublabel: sublabelMap[d.node_id] ?? '',
+              isHead: d.node_id === headNodeId,
+              isBranch: d.branch_label !== null,
+              isMerge: d.is_merge_node,
+              isSelected: selectedNodeIds.includes(d.node_id),
+              nodeId: d.node_id,
+              ...handlers,
+            };
+            return (
+              <ConversationNodeSVG
+                key={node.data.id}
+                data={nodeData}
+                x={node.x}
+                y={node.y}
+                onContextMenu={handleNodeContextMenu}
+              />
+            );
+          })}
+        </g>
+      </svg>
+
+      {/* Context menu (HTML overlay) */}
+      {ctxMenu && (
+        <div
+          ref={ctxMenuRef}
+          className="fixed z-50 bg-tenet-surface border border-tenet-border rounded shadow-lg py-1 min-w-max"
+          style={{
+            left: ctxMenu.x,
+            top: ctxMenu.y,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+          }}
         >
-          <Background color="#1e1e24" gap={20} />
-          <Controls />
-        </ReactFlow>
-      </div>
+          <button
+            className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-white/10 transition-colors"
+            onClick={() => {
+              handlers.onBranch(ctxMenu.nodeId);
+              setCtxMenu(null);
+            }}
+          >
+            &#x238B; Branch from Here
+          </button>
+          <button
+            className="block w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-white/10 transition-colors"
+            onClick={() => {
+              handlers.onPrune(ctxMenu.nodeId);
+              setCtxMenu(null);
+            }}
+          >
+            &#x2702; Prune
+          </button>
+        </div>
+      )}
 
       {/* Floating action bar */}
       {selectedNodeIds.length >= 1 && (
@@ -269,7 +402,7 @@ function BranchHistoryInner({ setActiveTab }: BranchHistoryViewProps) {
               onClick={handleBranchFromSelected}
               className="px-4 py-1.5 rounded bg-tenet-purple text-white font-semibold text-sm hover:opacity-90 transition-opacity"
             >
-              ⎇ Branch from Here
+              &#x238B; Branch from Here
             </button>
           )}
           <button
@@ -281,16 +414,5 @@ function BranchHistoryInner({ setActiveTab }: BranchHistoryViewProps) {
         </div>
       )}
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Exported component (wrapped in ReactFlowProvider)
-// ---------------------------------------------------------------------------
-export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewProps) {
-  return (
-    <ReactFlowProvider>
-      <BranchHistoryInner setActiveTab={setActiveTab} />
-    </ReactFlowProvider>
   );
 }

@@ -1,7 +1,3 @@
-import { useState, useEffect, useRef } from 'react';
-import { Handle, Position } from 'reactflow';
-import type { NodeProps } from 'reactflow';
-
 export interface ConversationNodeData {
   label: string;
   sublabel: string;
@@ -16,111 +12,131 @@ export interface ConversationNodeData {
   onSelect: (id: string) => void;
 }
 
-export default function ConversationNodeComponent({ data }: NodeProps<ConversationNodeData>) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
+interface ConversationNodeSVGProps {
+  data: ConversationNodeData;
+  x: number;
+  y: number;
+  onContextMenu: (e: React.MouseEvent, nodeId: string) => void;
+}
 
-  useEffect(() => {
-    if (!menuOpen) return;
-    function handleClickOutside(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [menuOpen]);
+const NODE_RADIUS = 8;
 
+export default function ConversationNodeSVG({
+  data,
+  x,
+  y,
+  onContextMenu,
+}: ConversationNodeSVGProps) {
   function handleClick() {
     data.onCheckout(data.nodeId);
     data.onSelect(data.nodeId);
   }
 
-  function handleContextMenu(e: React.MouseEvent) {
+  function handleCtx(e: React.MouseEvent) {
     e.preventDefault();
-    setMenuOpen(true);
+    onContextMenu(e, data.nodeId);
   }
 
-  function handleBranch() {
-    data.onBranch(data.nodeId);
-    setMenuOpen(false);
-  }
-
-  function handlePrune() {
-    data.onPrune(data.nodeId);
-    setMenuOpen(false);
-  }
-
-  // Dot styling
-  let dotBg: string;
-  let dotStyle: React.CSSProperties = { width: 14, height: 14, borderRadius: '50%', flexShrink: 0 };
+  let fill: string;
+  let gradientId: string | undefined;
 
   if (data.isMerge) {
-    dotBg = '';
-    dotStyle = {
-      ...dotStyle,
-      background: 'linear-gradient(135deg, #2DD4BF 50%, #7c3aed 50%)',
-    };
+    gradientId = `merge-grad-${data.nodeId}`;
+    fill = `url(#${gradientId})`;
   } else if (data.isBranch) {
-    dotBg = 'bg-tenet-purple';
+    fill = '#7c3aed';
   } else {
-    dotBg = 'bg-tenet-teal';
+    fill = '#2DD4BF';
   }
-
-  if (data.isHead) {
-    dotStyle = { ...dotStyle, boxShadow: '0 0 12px 3px rgba(45, 212, 191, 0.4)' };
-  }
-
-  const ringClass = data.isSelected ? 'ring-2 ring-white' : '';
 
   return (
-    <div style={{ position: 'relative' }}>
-      {/* React Flow handles */}
-      <Handle type="target" position={Position.Top}    id="top"    style={{ opacity: 0, width: 1, height: 1 }} />
-      <Handle type="source" position={Position.Bottom} id="bottom" style={{ opacity: 0, width: 1, height: 1 }} />
-      <Handle type="source" position={Position.Right}  id="right"  style={{ opacity: 0, width: 1, height: 1 }} />
-      <Handle type="target" position={Position.Left}   id="left"   style={{ opacity: 0, width: 1, height: 1 }} />
-
-      {/* Node body */}
-      <div
-        className="flex items-center gap-2 cursor-pointer select-none px-2 py-1 rounded hover:bg-white/5 transition-colors"
-        onClick={handleClick}
-        onContextMenu={handleContextMenu}
-      >
-        {/* Circle dot */}
-        <div
-          className={`${dotBg} ${ringClass} rounded-full`}
-          style={dotStyle}
-        />
-
-        {/* Labels */}
-        <div className="flex flex-col leading-tight">
-          <span className="text-white font-bold text-sm">{data.label}</span>
-          <span className="text-gray-500 text-xs">{data.sublabel}</span>
-        </div>
-      </div>
-
-      {/* Context menu */}
-      {menuOpen && (
-        <div
-          ref={menuRef}
-          className="absolute z-50 left-8 top-0 bg-tenet-surface border border-tenet-border rounded shadow-lg py-1 min-w-max"
-          style={{ boxShadow: '0 4px 16px rgba(0,0,0,0.6)' }}
-        >
-          <button
-            className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-white/10 transition-colors"
-            onClick={handleBranch}
-          >
-            ⎇ Branch from Here
-          </button>
-          <button
-            className="block w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-white/10 transition-colors"
-            onClick={handlePrune}
-          >
-            ✂ Prune
-          </button>
-        </div>
+    <g
+      transform={`translate(${x},${y})`}
+      onClick={handleClick}
+      onContextMenu={handleCtx}
+      style={{ cursor: 'pointer' }}
+    >
+      {gradientId && (
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
+            <stop offset="50%" stopColor="#2DD4BF" />
+            <stop offset="50%" stopColor="#7c3aed" />
+          </linearGradient>
+        </defs>
       )}
-    </div>
+
+      {/* Glow filter for head node */}
+      {data.isHead && (
+        <defs>
+          <filter id={`glow-${data.nodeId}`} x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="4" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+      )}
+
+      {/* Selection ring */}
+      {data.isSelected && (
+        <circle
+          r={NODE_RADIUS + 4}
+          fill="none"
+          stroke="white"
+          strokeWidth={2}
+        />
+      )}
+
+      {/* Main circle */}
+      <circle
+        r={NODE_RADIUS}
+        fill={fill}
+        filter={data.isHead ? `url(#glow-${data.nodeId})` : undefined}
+      />
+
+      {/* Head indicator ring */}
+      {data.isHead && (
+        <circle
+          r={NODE_RADIUS + 2}
+          fill="none"
+          stroke="#2DD4BF"
+          strokeWidth={1.5}
+          opacity={0.6}
+        />
+      )}
+
+      {/* Label */}
+      <text
+        x={NODE_RADIUS + 8}
+        y={-2}
+        fill="white"
+        fontSize={12}
+        fontWeight={700}
+        dominantBaseline="auto"
+      >
+        {data.label}
+      </text>
+
+      {/* Sublabel */}
+      <text
+        x={NODE_RADIUS + 8}
+        y={12}
+        fill="#6b7280"
+        fontSize={10}
+        dominantBaseline="auto"
+      >
+        {data.sublabel}
+      </text>
+
+      {/* Invisible hit area for easier clicking */}
+      <rect
+        x={-NODE_RADIUS - 4}
+        y={-NODE_RADIUS - 4}
+        width={180}
+        height={NODE_RADIUS * 2 + 8}
+        fill="transparent"
+      />
+    </g>
   );
 }
