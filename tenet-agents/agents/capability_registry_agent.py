@@ -36,6 +36,8 @@ class TenetCapabilityRegistryAgent:
             name="tenet-capability-registry",
             seed="tenet_capability_registry_seed_2024_secure",
             port=8019,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.config = config
         self.setup_handlers()

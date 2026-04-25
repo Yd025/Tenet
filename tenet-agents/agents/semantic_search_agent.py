@@ -13,7 +13,9 @@ class TenetSemanticSearch:
         self.agent = Agent(
             name="tenet-semantic-search",
             seed="tenet_semantic_search_seed_2024_secure",
-            port=8010
+            port=8010,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.setup_handlers()
 

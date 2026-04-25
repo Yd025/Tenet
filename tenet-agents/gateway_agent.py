@@ -1,5 +1,7 @@
 import asyncio
+import os
 import socket
+import sys
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -34,11 +36,16 @@ gateway_protocol = Protocol("gateway", version="1.0")
 app = FastAPI(title="Tenet Gateway")
 
 config = AgentConfig()
+GATEWAY_HTTP_PORT = int(os.getenv("TENET_GATEWAY_HTTP_PORT", "9000"))
+GATEWAY_UAGENT_PORT = int(os.getenv("TENET_GATEWAY_UAGENT_PORT", "9020"))
+GATEWAY_ENDPOINT = os.getenv("TENET_AGENT_ENDPOINT", f"http://127.0.0.1:{GATEWAY_UAGENT_PORT}/submit")
 gateway_agent = Agent(
     name="tenet-gateway",
     seed="tenet_gateway_seed_2024_secure",
-    port=9020,
-    endpoint=["http://127.0.0.1:9000/submit"],
+    port=GATEWAY_UAGENT_PORT,
+    endpoint=[GATEWAY_ENDPOINT],
+    mailbox=True,
+    publish_agent_details=True,
 )
 
 LOCAL_AGENTS = {
@@ -186,8 +193,8 @@ async def health() -> Dict[str, Any]:
         "status": "ok",
         "service": "tenet-gateway",
         "timestamp": time.time(),
-        "uagent_port": 9020,
-        "http_port": 9000,
+        "uagent_port": GATEWAY_UAGENT_PORT,
+        "http_port": GATEWAY_HTTP_PORT,
     }
 
 
@@ -206,16 +213,32 @@ async def process_http(request: GatewayRequest) -> GatewayResponse:
 
 
 def run_fastapi():
-    uvicorn.run(app, host="0.0.0.0", port=9000)
+    uvicorn.run(app, host="0.0.0.0", port=GATEWAY_HTTP_PORT)
+
+
+def ensure_gateway_ports_available():
+    in_use = []
+    if _is_port_open(GATEWAY_HTTP_PORT):
+        in_use.append(GATEWAY_HTTP_PORT)
+    if _is_port_open(GATEWAY_UAGENT_PORT):
+        in_use.append(GATEWAY_UAGENT_PORT)
+    if in_use:
+        print(f"❌ Gateway ports already in use: {', '.join(str(p) for p in in_use)}")
+        print("   Stop existing gateway process or pick new ports:")
+        print("   export TENET_GATEWAY_HTTP_PORT=9101")
+        print("   export TENET_GATEWAY_UAGENT_PORT=9102")
+        print("   export TENET_AGENT_ENDPOINT=http://127.0.0.1:9102/submit")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
+    ensure_gateway_ports_available()
     threading.Thread(target=run_fastapi, daemon=True).start()
     gateway_agent.include(gateway_protocol)
     print("🌐 Tenet Gateway Agent starting...")
     print(f"📍 Agent Address: {gateway_agent.address}")
-    print("🔗 uAgent endpoint registered: http://127.0.0.1:9000/submit")
-    print("🔗 HTTP endpoint: http://localhost:9000/process")
+    print(f"🔗 uAgent endpoint registered: {GATEWAY_ENDPOINT}")
+    print(f"🔗 HTTP endpoint: http://localhost:{GATEWAY_HTTP_PORT}/process")
     print(f"🔗 Local agent ports configured: {len(LOCAL_AGENTS)}")
     print("🔍 Checking local agent ports...")
     for agent_name, port in LOCAL_AGENTS.items():

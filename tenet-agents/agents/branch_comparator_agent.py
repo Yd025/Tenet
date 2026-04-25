@@ -36,6 +36,8 @@ class TenetBranchComparatorAgent:
             name="tenet-branch-comparator",
             seed="tenet_branch_comparator_seed_2024_secure",
             port=8015,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.config = config
         self.setup_handlers()

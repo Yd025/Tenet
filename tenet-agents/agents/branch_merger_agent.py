@@ -14,7 +14,9 @@ class TenetBranchMerger:
         self.agent = Agent(
             name="tenet-branch-merger",
             seed="tenet_branch_merger_seed_2024_secure",
-            port=8007
+            port=8007,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.setup_handlers()
 

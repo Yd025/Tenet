@@ -13,7 +13,9 @@ class TenetBranchSummarizer:
         self.agent = Agent(
             name="tenet-branch-summarizer",
             seed="tenet_branch_summarizer_seed_2024_secure",
-            port=8006
+            port=8006,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.setup_handlers()
 
