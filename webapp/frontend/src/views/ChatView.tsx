@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useConversationStore } from '../store/useConversationStore';
 // import { fetchChat } from '../api/client';  // TODO: re-enable when Ollama is running
 import type { ModelId } from '../types';
@@ -33,14 +33,24 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Subscribe to nodes + headNodeId directly so Zustand re-renders on every commit
   const nodes = useConversationStore((s) => s.nodes);
   const headNodeId = useConversationStore((s) => s.headNodeId);
   const commitMessage = useConversationStore((s) => s.commitMessage);
   const activeConversationId = useConversationStore((s) => s.activeConversationId);
-  const getThreadToHead = useConversationStore((s) => s.getThreadToHead);
 
-  const thread = getThreadToHead();
+  // Build thread inline so it's driven by reactive subscriptions, not get()
+  const thread = useMemo(() => {
+    if (!headNodeId) return [];
+    const result = [];
+    let currentId: string | null = headNodeId;
+    while (currentId !== null) {
+      const node = nodes[currentId];
+      if (!node || node.pruned) break;
+      result.push(node);
+      currentId = node.parent_id;
+    }
+    return result.reverse();
+  }, [nodes, headNodeId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
