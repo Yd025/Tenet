@@ -44,6 +44,7 @@ const seedNodes: Record<string, ConversationNode> = {
     node_id: SEED_V1_ID,
     conversation_id: SEED_CONV_ID,
     parent_id: null,
+    merge_parent_id: null,
     children_ids: [SEED_V2_ID],
     prompt:
       "I have a phone screening for a senior software engineer role at a mid-size fintech startup tomorrow. The job description emphasizes distributed systems, Python, and API design. Can you help me set the context so we can prep effectively?",
@@ -61,6 +62,7 @@ const seedNodes: Record<string, ConversationNode> = {
     node_id: SEED_V2_ID,
     conversation_id: SEED_CONV_ID,
     parent_id: SEED_V1_ID,
+    merge_parent_id: null,
     children_ids: [SEED_V3_ID, SEED_B1_ID],
     prompt:
       "Let's focus on the technical side first. What Python and distributed systems questions should I expect, and how should I frame my answers?",
@@ -78,6 +80,7 @@ const seedNodes: Record<string, ConversationNode> = {
     node_id: SEED_V3_ID,
     conversation_id: SEED_CONV_ID,
     parent_id: SEED_V2_ID,
+    merge_parent_id: null,
     children_ids: [],
     prompt:
       "Now give me 3 system design questions they're likely to ask and concise talking points for each.",
@@ -95,6 +98,7 @@ const seedNodes: Record<string, ConversationNode> = {
     node_id: SEED_B1_ID,
     conversation_id: SEED_CONV_ID,
     parent_id: SEED_V2_ID,
+    merge_parent_id: null,
     children_ids: [],
     prompt:
       "Actually, let me take a different angle — what behavioral questions should I prep for instead?",
@@ -150,7 +154,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     const newConv: Conversation = {
       id,
       title,
-      root_node_id: '',
+      root_node_id: null,
       created_at: new Date().toISOString(),
     };
     set((state) => ({
@@ -166,27 +170,30 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     model: ModelId,
     isSensitive: boolean,
   ) => {
-    const { activeConversationId, headNodeId } = get();
-    if (!activeConversationId) return;
-
     const nodeId = crypto.randomUUID();
-    const newNode: ConversationNode = {
-      node_id: nodeId,
-      conversation_id: activeConversationId,
-      parent_id: headNodeId,
-      children_ids: [],
-      prompt,
-      response,
-      model_used: model,
-      execution_context: 'local',
-      is_sensitive: isSensitive,
-      branch_label: null,
-      is_merge_node: false,
-      pruned: false,
-      timestamp: new Date().toISOString(),
-    };
+    const timestamp = new Date().toISOString();
 
     set((state) => {
+      const { activeConversationId, headNodeId } = state;
+      if (!activeConversationId) return {};
+
+      const newNode: ConversationNode = {
+        node_id: nodeId,
+        conversation_id: activeConversationId,
+        parent_id: headNodeId,
+        merge_parent_id: null,
+        children_ids: [],
+        prompt,
+        response,
+        model_used: model,
+        execution_context: 'local',
+        is_sensitive: isSensitive,
+        branch_label: null,
+        is_merge_node: false,
+        pruned: false,
+        timestamp,
+      };
+
       const updatedNodes = { ...state.nodes, [nodeId]: newNode };
 
       // If there was a previous head, register this new node as its child
@@ -218,18 +225,20 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
   },
 
   branchFromNode: (nodeId: string, label: string): string => {
-    const { activeConversationId } = get();
+    const { activeConversationId, nodes } = get();
     if (!activeConversationId) return '';
 
     const newNodeId = crypto.randomUUID();
+    const parentNode = nodes[nodeId];
     const newNode: ConversationNode = {
       node_id: newNodeId,
       conversation_id: activeConversationId,
       parent_id: nodeId,
+      merge_parent_id: null,
       children_ids: [],
       prompt: '',
       response: '',
-      model_used: 'deepseek',
+      model_used: parentNode?.model_used ?? 'deepseek',
       execution_context: 'local',
       is_sensitive: false,
       branch_label: label,
@@ -275,7 +284,12 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
         };
       }
 
-      return { nodes: updatedNodes };
+      const currentHead = state.headNodeId;
+      const newHeadNodeId = currentHead && allIds.includes(currentHead)
+        ? (state.nodes[nodeId]?.parent_id ?? null)
+        : currentHead;
+
+      return { nodes: updatedNodes, headNodeId: newHeadNodeId };
     });
   },
 
@@ -292,6 +306,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       node_id: mergeNodeId,
       conversation_id: activeConversationId,
       parent_id: nodeIdA,
+      merge_parent_id: nodeIdB,
       children_ids: [],
       prompt: `[Merge of ${nodeIdA} and ${nodeIdB}]`,
       response: synthesisResponse,
@@ -310,6 +325,12 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
         updatedNodes[nodeIdA] = {
           ...updatedNodes[nodeIdA],
           children_ids: [...updatedNodes[nodeIdA].children_ids, mergeNodeId],
+        };
+      }
+      if (updatedNodes[nodeIdB]) {
+        updatedNodes[nodeIdB] = {
+          ...updatedNodes[nodeIdB],
+          children_ids: [...updatedNodes[nodeIdB].children_ids, mergeNodeId],
         };
       }
       return {
@@ -353,9 +374,8 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     while (currentId !== null) {
       const node: ConversationNode | undefined = nodes[currentId];
       if (!node) break;
-      if (!node.pruned) {
-        thread.push(node);
-      }
+      if (node.pruned) break;  // ancestry chain is invalid from here
+      thread.push(node);
       currentId = node.parent_id;
     }
 

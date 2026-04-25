@@ -2,6 +2,7 @@ export interface ConversationNode {
   node_id: string;
   conversation_id: string;
   parent_id: string | null;
+  merge_parent_id: string | null;
   children_ids: string[];
   prompt: string;
   response: string;
@@ -17,7 +18,7 @@ export interface ConversationNode {
 export interface Conversation {
   id: string;
   title: string;
-  root_node_id: string;
+  root_node_id: string | null;
   created_at: string;
 }
 
