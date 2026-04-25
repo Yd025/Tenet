@@ -162,8 +162,8 @@ function BranchHistoryInner({ setActiveTab }: BranchHistoryViewProps) {
   const handlers = {
     onCheckout: useCallback((id: string) => checkoutNode(id), [checkoutNode]),
     onBranch: useCallback(
-      (id: string) => branchFromNode(id, 'New Branch'),
-      [branchFromNode],
+      (id: string) => { branchFromNode(id, 'New Branch'); clearMergeSelection(); },
+      [branchFromNode, clearMergeSelection],
     ),
     onPrune: useCallback((id: string) => pruneNode(id), [pruneNode]),
     onSelect: useCallback((id: string) => selectNodeForMerge(id), [selectNodeForMerge]),
