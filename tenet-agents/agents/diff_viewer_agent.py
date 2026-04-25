@@ -38,6 +38,8 @@ class TenetDiffViewerAgent:
             name="tenet-diff-viewer",
             seed="tenet_diff_viewer_seed_2024_secure",
             port=8014,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.config = config
         self.setup_handlers()

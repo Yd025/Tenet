@@ -6,7 +6,7 @@ export interface ConversationNode {
   children_ids: string[];
   prompt: string;
   response: string;
-  model_used: 'deepseek' | 'qwen';
+  model_used: ModelId;
   execution_context: 'local';
   is_sensitive: boolean;
   branch_label: string | null;
@@ -28,4 +28,4 @@ export interface TelemetryStats {
   tps: number;
 }
 
-export type ModelId = 'deepseek' | 'qwen';
+export type ModelId = 'deepseek' | 'qwen' | 'gemma4';

@@ -17,7 +17,9 @@ class TenetModelCoordinator:
         self.agent = Agent(
             name="tenet-model-coordinator",
             seed=self.config.MODEL_COORDINATOR_SEED,
-            port=self.config.MODEL_COORDINATOR_PORT
+            port=self.config.MODEL_COORDINATOR_PORT,
+            mailbox=True,
+            publish_agent_details=True,
         )
         
         # Model cache tracking

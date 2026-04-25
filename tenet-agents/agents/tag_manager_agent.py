@@ -44,6 +44,8 @@ class TenetTagManager:
             name="tenet-tag-manager",
             seed="tenet_tag_manager_seed_2024_secure",
             port=8012,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.config = config
         self.setup_handlers()

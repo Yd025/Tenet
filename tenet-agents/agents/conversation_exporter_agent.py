@@ -15,7 +15,9 @@ class TenetConversationExporter:
         self.agent = Agent(
             name="tenet-conversation-exporter",
             seed="tenet_conversation_exporter_seed_2024_secure",
-            port=8011
+            port=8011,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.setup_handlers()
 

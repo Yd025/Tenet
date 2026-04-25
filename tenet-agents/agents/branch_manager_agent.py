@@ -15,7 +15,9 @@ class TenetBranchManager:
         self.agent = Agent(
             name="tenet-branch-manager",
             seed=self.config.BRANCH_MANAGER_SEED,
-            port=self.config.BRANCH_MANAGER_PORT
+            port=self.config.BRANCH_MANAGER_PORT,
+            mailbox=True,
+            publish_agent_details=True,
         )
         
         # Setup protocol handlers

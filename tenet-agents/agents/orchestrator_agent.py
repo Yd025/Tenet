@@ -5,52 +5,6 @@ from config.agent_config import AgentConfig
 from utils.local_runtime import dag_store, memory_store, router, capability_registry
 import time
 
-MODEL_MAP = {
-    "deepseek": "deepseek-r1:latest",
-    "qwen": "qwen2.5:latest",
-}
-
-
-async def call_ollama(prompt: str, model: str, is_sensitive: bool) -> dict:
-    """Call Ollama REST API directly for local model inference.
-
-    Args:
-        prompt: The user prompt to send to the model.
-        model: Model key ("deepseek", "qwen") or a full Ollama model name.
-        is_sensitive: If True, forces use of deepseek-r1:latest for on-device privacy.
-
-    Returns:
-        dict with keys: response (str), tps (float), model_used (str)
-    """
-    if is_sensitive:
-        model_name = MODEL_MAP["deepseek"]
-    else:
-        model_name = MODEL_MAP.get(model, model)
-
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
-                "http://localhost:11434/api/generate",
-                json={
-                    "model": model_name,
-                    "prompt": prompt,
-                    "stream": False,
-                }
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-        response_text = data.get("response", "")
-        eval_duration = data.get("eval_duration", 1)  # nanoseconds
-        eval_count = data.get("eval_count", 1)
-        tps = round(eval_count / (eval_duration / 1e9), 1) if eval_duration > 0 else 0.0
-
-        return {"response": response_text, "tps": tps, "model_used": model_name}
-
-    except Exception as e:
-        return {"response": f"Agent unavailable: {str(e)}", "tps": 0.0, "model_used": model_name}
-
-
 class TenetOrchestrator:
     """Main orchestrator agent - Routes requests to specialist agents"""
     
@@ -61,7 +15,9 @@ class TenetOrchestrator:
         self.agent = Agent(
             name="tenet-orchestrator",
             seed=self.config.ORCHESTRATOR_SEED,
-            port=self.config.ORCHESTRATOR_PORT
+            port=self.config.ORCHESTRATOR_PORT,
+            mailbox=True,
+            publish_agent_details=True,
         )
         
         self.performance_metrics = {
@@ -176,42 +132,6 @@ class TenetOrchestrator:
         return {
             "response": response,
             "model_used": self.config.DEFAULT_LOCAL_MODEL,
-    async def analyze_privacy(self, msg: ChatRequest) -> dict:
-        """Analyze privacy level of the request"""
-        
-        # Check explicit privacy level
-        if msg.privacy_level == PrivacyLevel.SENSITIVE:
-            return {"level": PrivacyLevel.SENSITIVE, "confidence": 1.0}
-        
-        # Analyze content for sensitive information
-        prompt_lower = msg.prompt.lower()
-        has_sensitive = any(keyword in prompt_lower for keyword in self.config.SENSITIVE_KEYWORDS)
-        
-        if has_sensitive:
-            return {"level": PrivacyLevel.SENSITIVE, "confidence": 0.9}
-        elif msg.privacy_level == PrivacyLevel.PRIVATE:
-            return {"level": PrivacyLevel.PRIVATE, "confidence": 1.0}
-        else:
-            return {"level": PrivacyLevel.PUBLIC, "confidence": 1.0}
-    
-    async def route_to_local_model(self, msg: ChatRequest) -> dict:
-        """Route request to local Ollama model for sensitive/private data.
-
-        Uses call_ollama() which POSTs to http://localhost:11434/api/generate.
-        Sensitive requests are always routed to deepseek-r1:latest.
-        Falls back to cloud if Ollama is unavailable.
-        """
-        is_sensitive = (msg.privacy_level == PrivacyLevel.SENSITIVE)
-        model_key = getattr(msg, "model", self.config.DEFAULT_LOCAL_MODEL)
-        ollama_result = await call_ollama(msg.prompt, model_key, is_sensitive)
-
-        if ollama_result["response"].startswith("Agent unavailable:"):
-            print(f"Ollama unavailable: {ollama_result['response']}, falling back to cloud")
-            return await self.route_to_cloud_model(msg)
-
-        return {
-            "response": ollama_result["response"],
-            "model_used": ollama_result["model_used"],
             "execution_location": ExecutionLocation.LOCAL,
             "conversation_id": msg.conversation_id,
             "branch_id": msg.branch_id,
@@ -241,127 +161,6 @@ class TenetOrchestrator:
         action = msg.action
         if action in {BranchAction.CREATE, BranchAction.FORK}:
             branch = dag_store.create_branch(msg.conversation_id, msg.node_id, msg.branch_name)
-                "privacy": "local-execution",
-                "tps": ollama_result["tps"],
-            }
-        }
-    
-    async def route_to_cloud_model(self, msg: ChatRequest) -> dict:
-        """Route request to cloud API"""
-        
-        try:
-            # Try OpenAI first
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.config.OPENAI_API_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": self.config.DEFAULT_CLOUD_MODEL,
-                        "messages": [{"role": "user", "content": msg.prompt}],
-                        "max_tokens": 1000
-                    },
-                    timeout=self.config.CLOUD_TIMEOUT
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "response": result["choices"][0]["message"]["content"],
-                    "model_used": self.config.DEFAULT_CLOUD_MODEL,
-                    "execution_location": ExecutionLocation.CLOUD,
-                    "conversation_id": msg.conversation_id,
-                    "branch_id": msg.branch_id,
-                    "metadata": {
-                        "privacy": "cloud-execution",
-                        "provider": "openai"
-                    }
-                }
-                
-        except Exception as e:
-            # Fallback to simpler model if main fails
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {self.config.OPENAI_API_KEY}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": self.config.FALLBACK_MODEL,
-                            "messages": [{"role": "user", "content": msg.prompt}],
-                            "max_tokens": 500
-                        },
-                        timeout=self.config.CLOUD_TIMEOUT
-                    )
-                    response.raise_for_status()
-                    result = response.json()
-                    
-                    return {
-                        "response": result["choices"][0]["message"]["content"],
-                        "model_used": self.config.FALLBACK_MODEL,
-                        "execution_location": ExecutionLocation.CLOUD,
-                        "conversation_id": msg.conversation_id,
-                        "branch_id": msg.branch_id,
-                        "metadata": {
-                            "privacy": "cloud-execution-fallback",
-                            "provider": "openai"
-                        }
-                    }
-            except Exception as fallback_error:
-                raise Exception(f"Both primary and fallback cloud APIs failed: {str(e)}")
-    
-    async def store_conversation_context(self, msg: ChatRequest, response: dict):
-        """Store conversation context via context keeper"""
-        
-        try:
-            context_data = {
-                "conversation_id": msg.conversation_id,
-                "branch_id": msg.branch_id,
-                "prompt": msg.prompt,
-                "response": response["response"],
-                "model_used": response["model_used"],
-                "execution_location": response["execution_location"],
-                "timestamp": time.time(),
-                "metadata": response.get("metadata", {})
-            }
-            
-            # Store via backend API (Person 4)
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/context",
-                    json=context_data,
-                    timeout=5.0
-                )
-                
-        except Exception as e:
-            print(f"Failed to store context: {e}")
-    
-    async def create_branch(self, msg: BranchRequest) -> dict:
-        """Create new conversation branch via backend API"""
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.config.BACKEND_API_URL}/api/branches",
-                    json={
-                        "action": msg.action,
-                        "conversation_id": msg.conversation_id,
-                        "node_id": msg.node_id,
-                        "branch_name": msg.branch_name,
-                        "user_id": msg.user_id,
-                        "source_branch_id": msg.source_branch_id,
-                        "target_branch_id": msg.target_branch_id
-                    },
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                return response.json()
-                
-        except Exception as e:
             return {
                 "success": True,
                 "branch_id": branch["branch_id"],

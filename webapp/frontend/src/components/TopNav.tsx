@@ -12,11 +12,12 @@ interface TopNavProps {
 }
 
 const MODEL_LABELS: Record<string, string> = {
+  gemma4: 'Gemma 4',
   deepseek: 'DeepSeek R1',
   qwen: 'Qwen 2.5',
 };
 
-const MODELS = ['deepseek', 'qwen'];
+const MODELS = ['gemma4', 'deepseek', 'qwen'];
 
 export default function TopNav({
   activeTab,

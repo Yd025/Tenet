@@ -17,7 +17,9 @@ class TenetPrivacyRouter:
         self.agent = Agent(
             name="tenet-privacy-router",
             seed=self.config.PRIVACY_ROUTER_SEED,
-            port=self.config.PRIVACY_ROUTER_PORT
+            port=self.config.PRIVACY_ROUTER_PORT,
+            mailbox=True,
+            publish_agent_details=True,
         )
         
         # Privacy patterns

@@ -16,7 +16,9 @@ class TenetContextKeeper:
         self.agent = Agent(
             name="tenet-context-keeper",
             seed=self.config.CONTEXT_KEEPER_SEED,
-            port=self.config.CONTEXT_KEEPER_PORT
+            port=self.config.CONTEXT_KEEPER_PORT,
+            mailbox=True,
+            publish_agent_details=True,
         )
         
         # In-memory cache for frequently accessed context

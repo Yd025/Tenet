@@ -14,7 +14,9 @@ class TenetNodePruner:
         self.agent = Agent(
             name="tenet-node-pruner",
             seed="tenet_node_pruner_seed_2024_secure",
-            port=8009
+            port=8009,
+            mailbox=True,
+            publish_agent_details=True,
         )
         self.setup_handlers()
 
