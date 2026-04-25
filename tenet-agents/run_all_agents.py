@@ -75,6 +75,30 @@ AGENTS = [
         "script": "agents/conversation_exporter_agent.py",
         "port": 8011,
         "color": "📤"
+    },
+    {
+        "name": "Tag Manager",
+        "script": "agents/tag_manager_agent.py",
+        "port": 8012,
+        "color": "🏷️"
+    },
+    {
+        "name": "Rollback Agent",
+        "script": "agents/rollback_agent.py",
+        "port": 8013,
+        "color": "⏪"
+    },
+    {
+        "name": "Diff Viewer",
+        "script": "agents/diff_viewer_agent.py",
+        "port": 8014,
+        "color": "🧾"
+    },
+    {
+        "name": "Branch Comparator",
+        "script": "agents/branch_comparator_agent.py",
+        "port": 8015,
+        "color": "🧮"
     }
 ]
 

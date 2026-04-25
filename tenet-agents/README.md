@@ -43,6 +43,10 @@ cd tenet-agents
 ../.venv/bin/python agents/node_pruner_agent.py
 ../.venv/bin/python agents/semantic_search_agent.py
 ../.venv/bin/python agents/conversation_exporter_agent.py
+../.venv/bin/python agents/tag_manager_agent.py
+../.venv/bin/python agents/rollback_agent.py
+../.venv/bin/python agents/diff_viewer_agent.py
+../.venv/bin/python agents/branch_comparator_agent.py
 ```
 
 ## Validate Local Workflows
@@ -56,3 +60,4 @@ cd tenet-agents
 
 - `ExecutionLocation` is still part of contracts, but local-only policy forces local execution.
 - Cloud calls remain intentionally disabled in runtime behavior.
+- Additional local-only tooling agents are available for tag management, rollback, diff viewing, and branch comparison.

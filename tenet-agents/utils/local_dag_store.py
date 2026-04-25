@@ -165,6 +165,35 @@ class LocalDagStore:
             node = self._nodes.get(node_id)
             return deepcopy(node) if node else None
 
+    def list_nodes(
+        self,
+        conversation_id: str,
+        branch_id: Optional[str] = None,
+        include_pruned: bool = False,
+    ) -> List[Dict]:
+        with self._lock:
+            nodes: List[Dict] = []
+            for node in self._nodes.values():
+                if node.get("conversation_id") != conversation_id:
+                    continue
+                if branch_id and node.get("branch_id") != branch_id:
+                    continue
+                if not include_pruned and node.get("pruned"):
+                    continue
+                nodes.append(deepcopy(node))
+            nodes.sort(key=lambda n: n.get("timestamp", 0))
+            return nodes
+
+    def update_node_metadata(self, node_id: str, metadata: Dict) -> Optional[Dict]:
+        with self._lock:
+            node = self._nodes.get(node_id)
+            if not node:
+                return None
+            current = node.get("metadata", {})
+            current.update(metadata)
+            node["metadata"] = current
+            return deepcopy(node)
+
     def get_branch(self, branch_id: str) -> Optional[Dict]:
         with self._lock:
             branch = self._branches.get(branch_id)
