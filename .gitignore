@@ -1,0 +1,7 @@
+.worktrees/
+.superpowers/
+node_modules/
+__pycache__/
+*.pyc
+.env
+dist/
