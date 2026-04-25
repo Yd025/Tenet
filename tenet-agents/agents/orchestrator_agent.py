@@ -2,7 +2,7 @@ from uagents import Agent, Context
 from protocols.chat_protocol import ChatRequest, ChatResponse, chat_protocol, ExecutionLocation
 from protocols.branch_protocol import BranchRequest, BranchResponse, branch_protocol, BranchAction
 from config.agent_config import AgentConfig
-from utils.local_runtime import dag_store, memory_store, router
+from utils.local_runtime import dag_store, memory_store, router, capability_registry
 import time
 
 class TenetOrchestrator:
@@ -122,6 +122,7 @@ class TenetOrchestrator:
                 await ctx.send(sender, error_response)
     
     def generate_local_response(self, msg: ChatRequest, privacy_assessment: dict) -> dict:
+        selected_agent = self.select_specialist_agent(msg.prompt, privacy_assessment["privacy_level"])
         response = (
             f"Local-only mode response for '{msg.prompt[:80]}'. "
             "This response is generated without outbound service calls."
@@ -136,8 +137,23 @@ class TenetOrchestrator:
                 "privacy_level": privacy_assessment["privacy_level"],
                 "route_recommendation": privacy_assessment["recommendation"],
                 "local_only_mode": True,
+                "selected_specialist_agent": selected_agent.get("agent_name") if selected_agent else "tenet-orchestrator",
             },
         }
+
+    def select_specialist_agent(self, prompt: str, privacy_level: str) -> dict | None:
+        prompt_lower = prompt.lower()
+        if privacy_level == "sensitive":
+            return capability_registry.find_best_agent("secure_routing")
+        if any(word in prompt_lower for word in ["search", "find", "retrieve"]):
+            return capability_registry.find_best_agent("semantic_search")
+        if any(word in prompt_lower for word in ["branch", "fork", "rollback", "merge"]):
+            return capability_registry.find_best_agent("branch_management")
+        if any(word in prompt_lower for word in ["memory", "context", "recall"]):
+            return capability_registry.find_best_agent("context_management")
+        if any(word in prompt_lower for word in ["model", "load", "unload", "optimize"]):
+            return capability_registry.find_best_agent("model_management")
+        return None
 
     def handle_branch_action(self, msg: BranchRequest) -> dict:
         action = msg.action

@@ -99,6 +99,30 @@ AGENTS = [
         "script": "agents/branch_comparator_agent.py",
         "port": 8015,
         "color": "🧮"
+    },
+    {
+        "name": "Storage Optimizer",
+        "script": "agents/storage_optimizer_agent.py",
+        "port": 8016,
+        "color": "🧹"
+    },
+    {
+        "name": "Resource Monitor",
+        "script": "agents/resource_monitor_agent.py",
+        "port": 8017,
+        "color": "📊"
+    },
+    {
+        "name": "Graph Integrity",
+        "script": "agents/graph_integrity_agent.py",
+        "port": 8018,
+        "color": "🕸️"
+    },
+    {
+        "name": "Capability Registry",
+        "script": "agents/capability_registry_agent.py",
+        "port": 8019,
+        "color": "🗂️"
     }
 ]
 

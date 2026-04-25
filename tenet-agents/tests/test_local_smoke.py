@@ -11,6 +11,14 @@ from agents.tag_manager_agent import TenetTagManager, TagRequest, TagAction
 from agents.rollback_agent import TenetRollbackAgent
 from agents.diff_viewer_agent import TenetDiffViewerAgent, DiffRequest
 from agents.branch_comparator_agent import TenetBranchComparatorAgent
+from agents.storage_optimizer_agent import TenetStorageOptimizerAgent, StorageOptimizeRequest
+from agents.resource_monitor_agent import TenetResourceMonitorAgent
+from agents.graph_integrity_agent import TenetGraphIntegrityAgent
+from agents.capability_registry_agent import (
+    TenetCapabilityRegistryAgent,
+    CapabilityRegistryRequest,
+)
+from agents.orchestrator_agent import TenetOrchestrator
 
 
 def test_local_chat_branch_memory_flow():
@@ -168,3 +176,68 @@ def test_rollback_diff_and_compare_smoke():
     compare = comparator.compare_branches(main["branch_id"], alt["branch_id"])
     assert compare.success
     assert n1["node_id"] in compare.shared_node_ids
+
+
+def test_storage_optimizer_resource_monitor_graph_integrity_smoke():
+    conversation_id = "conv-infra-1"
+    branch = dag_store.create_branch(conversation_id, None, "infra")
+    node = dag_store.add_node(
+        conversation_id=conversation_id,
+        branch_id=branch["branch_id"],
+        prompt="Infra prompt",
+        response="Infra response",
+        model_used="llama2-7b-4bit",
+        execution_location="local",
+    )
+    dag_store.prune_node(node["node_id"], "soft")
+
+    optimizer = TenetStorageOptimizerAgent()
+    optimize = optimizer.optimize(
+        StorageOptimizeRequest(
+            conversation_id=conversation_id,
+            prune_soft_deleted=True,
+            unload_unused_models=True,
+        )
+    )
+    assert optimize.success
+
+    monitor = TenetResourceMonitorAgent()
+    status = monitor.get_status(include_thermal=True)
+    assert status.success
+    assert status.loaded_models >= 0
+
+    integrity = TenetGraphIntegrityAgent()
+    result = integrity.validate_graph(conversation_id, include_pruned=True)
+    assert result.success
+
+
+def test_capability_registry_and_orchestrator_routing_smoke():
+    registry = TenetCapabilityRegistryAgent()
+    # register a custom agent and ensure it is visible
+    registry_response_action = CapabilityRegistryRequest(
+        action="register",
+        agent_name="tenet-custom-agent",
+        capabilities=["custom_capability"],
+        protocols=["custom"],
+    )
+    # Call registry internals indirectly through shared runtime by invoking handler equivalent logic:
+    # Since protocol callbacks are async-bound, verify by listing after registration through runtime helper.
+    from utils.local_runtime import capability_registry
+    capability_registry.register_agent(
+        registry_response_action.agent_name,
+        registry_response_action.capabilities,
+        registry_response_action.protocols,
+    )
+    listed = capability_registry.list_agents()
+    assert any(a["agent_name"] == "tenet-custom-agent" for a in listed)
+
+    orchestrator = TenetOrchestrator()
+    resolved = orchestrator.select_specialist_agent("please search my prior context", "private")
+    assert resolved is not None
+    assert resolved["agent_name"] in {
+        "tenet-semantic-search",
+        "tenet-context-keeper",
+        "tenet-privacy-router",
+        "tenet-branch-manager",
+        "tenet-model-coordinator",
+    }

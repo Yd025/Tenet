@@ -47,7 +47,18 @@ cd tenet-agents
 ../.venv/bin/python agents/rollback_agent.py
 ../.venv/bin/python agents/diff_viewer_agent.py
 ../.venv/bin/python agents/branch_comparator_agent.py
+../.venv/bin/python agents/storage_optimizer_agent.py
+../.venv/bin/python agents/resource_monitor_agent.py
+../.venv/bin/python agents/graph_integrity_agent.py
+../.venv/bin/python agents/capability_registry_agent.py
 ```
+
+## Capability-Based Routing
+
+- `orchestrator_agent` now consults the local capability registry to select a specialist agent for each prompt.
+- Registry state is managed by `capability_registry_agent` and seeded in `utils/local_runtime.py`.
+- Routing decisions are attached to chat metadata as `selected_specialist_agent`.
+- In local-only mode this is policy-and-selection logic; execution remains local.
 
 ## Validate Local Workflows
 
@@ -60,4 +71,4 @@ cd tenet-agents
 
 - `ExecutionLocation` is still part of contracts, but local-only policy forces local execution.
 - Cloud calls remain intentionally disabled in runtime behavior.
-- Additional local-only tooling agents are available for tag management, rollback, diff viewing, and branch comparison.
+- Additional local-only tooling agents are available for tag management, rollback, diff viewing, branch comparison, storage optimization, resource monitoring, graph integrity checks, and capability registration.
