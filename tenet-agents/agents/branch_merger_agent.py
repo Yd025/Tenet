@@ -6,6 +6,7 @@ from config.agent_config import AgentConfig
 import httpx
 import json
 import uuid
+import time
 
 class TenetBranchMerger:
     """Merges branches intelligently"""
@@ -149,7 +150,7 @@ class TenetBranchMerger:
             if resolution == "keep_source":
                 resolved_nodes.append(source_nodes[conflict.node_id])
             elif resolution == "keep_target":
-                pass
+                continue
             elif resolution == "keep_both":
                 source_node = source_nodes[conflict.node_id].copy()
                 source_node["node_id"] = str(uuid.uuid4())
@@ -229,7 +230,7 @@ class TenetBranchMerger:
                     "nodes": nodes,
                     "user_id": user_id,
                     "merge_info": {
-                        "merged_at": httpx._time.time(),
+                        "merged_at": time.time(),
                         "merged_from": target_branch.get("branch_id")
                     }
                 },

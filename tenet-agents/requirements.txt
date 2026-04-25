@@ -1,0 +1,4 @@
+uagents
+fetchai
+httpx
+pydantic

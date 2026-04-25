@@ -1,6 +1,6 @@
 from uagents.protocol import Protocol
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 from enum import Enum
 
 class BranchAction(str, Enum):

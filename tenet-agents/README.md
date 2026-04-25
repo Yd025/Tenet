@@ -2,7 +2,7 @@
 Installation:
 
 # Install dependencies
-pip install uagents fetchai httpx pydantic
+pip install -r requirements.txt
 
 # Create project structure
 mkdir -p tenet-agents/{config,protocols,agents,utils}
@@ -17,6 +17,9 @@ export HARDWARE_API_URL="http://localhost:9000"  # Person 2's API
 export BACKEND_API_URL="http://localhost:5000"   # Person 4's API
 export OPENAI_API_KEY="your_openai_api_key"
 Run All Agents:
+
+# Run commands from the tenet-agents directory
+cd tenet-agents
 
 # Make the script executable
 chmod +x run_all_agents.py
