@@ -1,6 +1,5 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import chat
 from app.routes import router as app_router
 
 app = FastAPI(title="Tenet API")
@@ -13,5 +12,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(chat.router, prefix="/api")
 app.include_router(app_router, prefix="/api")

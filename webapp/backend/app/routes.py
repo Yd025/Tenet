@@ -1,7 +1,8 @@
-import os, time, json, uuid, logging, random
+import os, time, json, uuid, logging
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from .models import Node, ChatRequest, MergeRequest, RootMergeRequest, NodeSummaryRequest
+from .models import Node, ChatRequest, MergeRequest, RootMergeRequest, NodeSummaryRequest, UpdateNodeRequest, UpdateConversationRequest, BulkDeleteRequest
 from .database import nodes_collection, conversations_collection
 import httpx
 import pynvml
@@ -22,25 +23,18 @@ except Exception as e:
 router = APIRouter()
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 
-# Initialize NVML for real GX10 Blackwell telemetry
-try:
-    pynvml.nvmlInit()
-    nvml_enabled = True
-except:
-    nvml_enabled = False
-    logger.warning("NVML not found. Falling back to mock telemetry.")
-
 # --- HELPER: CONTEXT RECONSTRUCTION ---
 async def get_history(last_node_id: str):
-    """Walk the parent chain and return messages in chronological order."""
+    """Walk the parent chain and return messages in chronological order, skipping pruned nodes."""
     chain = []
     curr = last_node_id
     while curr:
         node = await nodes_collection.find_one({"node_id": curr})
         if not node:
             break
-        chain.append(node)
         parent_ids = node.get("parent_ids") or []
+        if not node.get("pruned"):
+            chain.append(node)
         curr = parent_ids[0] if parent_ids else None
 
     # chain is leaf→root, reverse to get root→leaf (chronological)
@@ -48,7 +42,7 @@ async def get_history(last_node_id: str):
 
     history = []
     for node in chain:
-        if node.get("prompt") and node["prompt"] != "SYSTEM_MERGE_ACTION":
+        if node.get("prompt") and node["prompt"] not in ("SYSTEM_MERGE_ACTION", "⎇ Merge Synthesis"):
             history.append({"role": "user", "content": node["prompt"]})
         if node.get("response"):
             history.append({"role": "assistant", "content": node["response"]})
@@ -86,7 +80,7 @@ async def get_telemetry():
     # Start with an empty or minimal truth-only dictionary
     stats = {
         "status": "online",
-        "active_nodes": await nodes_collection.count_documents({})
+        "active_nodes": await nodes_collection.count_documents({"pruned": {"$ne": True}})
     }
 
     if nvml_enabled:
@@ -128,7 +122,7 @@ async def get_telemetry():
 # --- 2. GET NODES BY ROOT ---
 @router.get("/nodes")
 async def get_nodes(root_id: str = Query(..., description="The root/conversation ID")):
-    docs = await nodes_collection.find({"root_id": root_id}).to_list(1000)
+    docs = await nodes_collection.find({"root_id": root_id, "pruned": {"$ne": True}}).to_list(1000)
     return [serialize_node(d) for d in docs]
 
 # --- 3. GET SINGLE NODE ---
@@ -148,8 +142,126 @@ async def list_roots():
 # --- 5. LIST CONVERSATIONS (with titles) ---
 @router.get("/conversations")
 async def list_conversations():
-    docs = await conversations_collection.find({}).to_list(1000)
+    docs = await conversations_collection.find({}).sort("last_active_at", -1).to_list(1000)
     return [serialize_node(d) for d in docs]
+
+
+# --- 6. GET SINGLE CONVERSATION ---
+@router.get("/conversations/{root_id}")
+async def get_conversation(root_id: str):
+    doc = await conversations_collection.find_one({"root_id": root_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return serialize_node(doc)
+
+
+# --- 7. UPDATE CONVERSATION TITLE ---
+@router.put("/conversations/{root_id}")
+async def update_conversation(root_id: str, req: UpdateConversationRequest):
+    update_fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    result = await conversations_collection.update_one(
+        {"root_id": root_id},
+        {"$set": update_fields},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    doc = await conversations_collection.find_one({"root_id": root_id})
+    return serialize_node(doc)
+
+
+# --- 8. DELETE CONVERSATION AND ALL ITS NODES ---
+@router.delete("/conversations/{root_id}")
+async def delete_conversation(root_id: str):
+    node_result = await nodes_collection.delete_many({"root_id": root_id})
+    conv_result = await conversations_collection.delete_one({"root_id": root_id})
+    return {
+        "deleted_nodes": node_result.deleted_count,
+        "deleted_conversation": conv_result.deleted_count,
+    }
+
+
+# --- 9. UPDATE A NODE ---
+@router.put("/nodes/{node_id}")
+async def update_node(node_id: str, req: UpdateNodeRequest):
+    update_fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    # Flatten metadata updates so we don't overwrite the whole metadata object
+    if "metadata" in update_fields:
+        meta = update_fields.pop("metadata")
+        for k, v in meta.items():
+            update_fields[f"metadata.{k}"] = v
+    result = await nodes_collection.update_one(
+        {"node_id": node_id},
+        {"$set": update_fields},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Node not found")
+    doc = await nodes_collection.find_one({"node_id": node_id})
+    return serialize_node(doc)
+
+
+# --- 10. SOFT-DELETE (PRUNE) A NODE ---
+@router.delete("/nodes/{node_id}")
+async def delete_node(node_id: str, hard: bool = Query(False, description="Hard delete removes from DB; soft delete marks pruned=True")):
+    if hard:
+        result = await nodes_collection.delete_one({"node_id": node_id})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Node not found")
+        return {"deleted": True, "node_id": node_id}
+    else:
+        result = await nodes_collection.update_one(
+            {"node_id": node_id},
+            {"$set": {"pruned": True}},
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Node not found")
+        return {"pruned": True, "node_id": node_id}
+
+
+# --- 11. BULK DELETE NODES ---
+@router.delete("/nodes")
+async def bulk_delete_nodes(req: BulkDeleteRequest, hard: bool = Query(False)):
+    if hard:
+        result = await nodes_collection.delete_many({"node_id": {"$in": req.node_ids}})
+        return {"deleted": result.deleted_count}
+    else:
+        result = await nodes_collection.update_many(
+            {"node_id": {"$in": req.node_ids}},
+            {"$set": {"pruned": True}},
+        )
+        return {"pruned": result.modified_count}
+
+
+# --- 12. RESTORE A PRUNED NODE ---
+@router.patch("/nodes/{node_id}/restore")
+async def restore_node(node_id: str):
+    result = await nodes_collection.update_one(
+        {"node_id": node_id},
+        {"$set": {"pruned": False}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Node not found")
+    doc = await nodes_collection.find_one({"node_id": node_id})
+    return serialize_node(doc)
+
+
+# --- 13. REPARENT A NODE (move branch point) ---
+@router.patch("/nodes/{node_id}/reparent")
+async def reparent_node(node_id: str, new_parent_id: str = Query(...)):
+    parent = await nodes_collection.find_one({"node_id": new_parent_id})
+    if not parent:
+        raise HTTPException(status_code=404, detail="New parent node not found")
+    result = await nodes_collection.update_one(
+        {"node_id": node_id},
+        {"$set": {"parent_ids": [new_parent_id]}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Node not found")
+    doc = await nodes_collection.find_one({"node_id": node_id})
+    return serialize_node(doc)
 
 
 @router.post("/nodes/summaries")
@@ -213,6 +325,25 @@ async def generate_node_summaries(req: NodeSummaryRequest):
 
     return {"summaries": summaries}
 
+# --- MIGRATION: backfill created_at from ObjectId timestamp ---
+@router.post("/conversations/backfill-timestamps")
+async def backfill_conversation_timestamps():
+    docs = await conversations_collection.find({}).to_list(1000)
+    updated = 0
+    for doc in docs:
+        if doc.get("created_at"):
+            continue  # already has a timestamp
+        # Extract creation time from MongoDB ObjectId
+        oid = doc.get("_id")
+        if oid:
+            ts = oid.generation_time.isoformat()
+            await conversations_collection.update_one(
+                {"_id": oid},
+                {"$set": {"created_at": ts}},
+            )
+            updated += 1
+    return {"backfilled": updated}
+
 # --- HELPER: generate a short title from the first prompt ---
 async def generate_title(prompt: str, model: str) -> str:
     try:
@@ -240,19 +371,19 @@ def _tokenize(text: str) -> set[str]:
 def _candidate_score(prompt_tokens: set[str], node: dict) -> int:
     node_tokens = _tokenize(f"{node.get('prompt', '')} {node.get('response', '')}")
     overlap = len(prompt_tokens.intersection(node_tokens))
-    recency_bonus = 1 if node.get("metadata", {}).get("timestamp") else 0
+    recency_bonus = 1 if node.get("timestamp") else 0
     return overlap * 10 + recency_bonus
 
 
 async def choose_auto_parent_id(req: ChatRequest) -> str | None:
-    nodes = await nodes_collection.find({"root_id": req.root_id}).to_list(1000)
+    nodes = await nodes_collection.find({"root_id": req.root_id, "pruned": {"$ne": True}}).to_list(1000)
     if not nodes:
         return None
 
     prompt_tokens = _tokenize(req.prompt)
     scored = sorted(
         nodes,
-        key=lambda n: (_candidate_score(prompt_tokens, n), n.get("metadata", {}).get("timestamp", "")),
+        key=lambda n: (_candidate_score(prompt_tokens, n), n.get("timestamp", "")),
         reverse=True,
     )
     candidates = scored[:8]
@@ -288,17 +419,17 @@ async def choose_auto_parent_id(req: ChatRequest) -> str | None:
             )
             resp.raise_for_status()
             raw = resp.json().get("response", "").strip()
-            parsed = json.loads(raw)
+            parsed = json.loads(_extract_json_block(raw))
             parent_id = parsed.get("parent_id")
             if isinstance(parent_id, str) and any(n.get("node_id") == parent_id for n in candidates):
                 return parent_id
     except Exception as e:
         logger.warning(f"Auto branching selector failed, using fallback: {e}")
 
-    # Fallback: most recent candidate by timestamp.
+    # Fallback: most recent candidate by top-level timestamp.
     candidates_sorted = sorted(
         candidates,
-        key=lambda n: n.get("metadata", {}).get("timestamp", ""),
+        key=lambda n: n.get("timestamp", ""),
         reverse=True,
     )
     return candidates_sorted[0].get("node_id")
@@ -308,7 +439,6 @@ async def choose_auto_parent_id(req: ChatRequest) -> str | None:
 async def stream_chat(req: ChatRequest):
     async def event_generator():
         full_response = ""
-        start_time = time.time()
         resolved_parent_id = req.parent_id
         if req.auto_branching:
             resolved_parent_id = await choose_auto_parent_id(req)
@@ -316,19 +446,26 @@ async def stream_chat(req: ChatRequest):
 
         # Build context from the parent chain
         history = await get_history(resolved_parent_id) if resolved_parent_id else []
+        history.insert(0, {
+            "role": "system",
+            "content": "Be concise. Answer directly without unnecessary preamble, repetition, or filler. Use markdown only when it genuinely helps clarity."
+        })
         history.append({"role": "user", "content": req.prompt})
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream("POST", f"{OLLAMA_URL}/api/chat", 
                 json={"model": req.model, "messages": history, "stream": True}) as r:
                 
+                last_tps = 0.0
                 async for line in r.aiter_lines():
                     if not line: continue
                     data = json.loads(line)
                     token = data.get("message", {}).get("content", "")
                     full_response += token
-                    
-                    yield f"data: {json.dumps({'token': token, 'tps': 61.7})}\n\n"
+                    # Ollama reports eval_count / eval_duration (ns) on the final chunk
+                    if data.get("eval_count") and data.get("eval_duration"):
+                        last_tps = round(data["eval_count"] / (data["eval_duration"] / 1e9), 1)
+                    yield f"data: {json.dumps({'token': token, 'tps': last_tps})}\n\n"
         
         p_ids = [resolved_parent_id] if resolved_parent_id and resolved_parent_id != "null" else []
         
@@ -340,7 +477,7 @@ async def stream_chat(req: ChatRequest):
             model_used=req.model,
             metadata={
                 "model": req.model,
-                "tps": 61.7,
+                "tps": last_tps,
                 "auto_branching": req.auto_branching,
                 "resolved_parent_id": resolved_parent_id,
             },
@@ -357,9 +494,16 @@ async def stream_chat(req: ChatRequest):
                 {"$setOnInsert": {
                     "root_id": req.root_id,
                     "title": title,
-                    "created_at": new_node.model_dump().get("metadata", {}).get("timestamp", ""),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "last_active_at": datetime.now(timezone.utc).isoformat(),
                 }},
                 upsert=True,
+            )
+        else:
+            # Update last_active_at on every subsequent message
+            await conversations_collection.update_one(
+                {"root_id": req.root_id},
+                {"$set": {"last_active_at": datetime.now(timezone.utc).isoformat()}},
             )
 
         yield f"data: {json.dumps({'type': 'node_saved', 'node_id': new_node.node_id, 'parent_id': resolved_parent_id})}\n\n"
@@ -376,8 +520,8 @@ async def merge_nodes(req: MergeRequest):
     if not nodes:
         raise HTTPException(status_code=404, detail="Source nodes for merge not found")
 
-    if len(req.node_ids) != 2:
-        raise HTTPException(status_code=400, detail="Merge currently requires exactly 2 node_ids")
+    if len(req.node_ids) < 2 or len(req.node_ids) > 5:
+        raise HTTPException(status_code=400, detail="Merge requires between 2 and 5 node_ids")
 
     node_by_id = {n.get("node_id"): n for n in nodes}
     missing_ids = [nid for nid in req.node_ids if nid not in node_by_id]
@@ -387,11 +531,14 @@ async def merge_nodes(req: MergeRequest):
             detail=f"Source nodes not found: {', '.join(missing_ids)}",
         )
 
-    ordered_nodes = [node_by_id[req.node_ids[0]], node_by_id[req.node_ids[1]]]
-    if len(ordered_nodes) != 2:
-        raise HTTPException(status_code=400, detail="Merge currently requires exactly 2 nodes")
+    ordered_nodes = [node_by_id[nid] for nid in req.node_ids]
 
-    # Preserve client intent: left is first selected node, right is second.
+    # Build context from all selected nodes
+    node_texts = []
+    for i, n in enumerate(ordered_nodes):
+        node_texts.append(f"Branch {i+1}:\nPrompt: {n.get('prompt', '')}\nResponse: {n.get('response', '')}")
+
+    # Conflict detection only for 2-node merges (too complex for N-way)
     left = ordered_nodes[0]
     right = ordered_nodes[1]
     left_text = f"Prompt: {left.get('prompt', '')}\nResponse: {left.get('response', '')}"
@@ -399,15 +546,10 @@ async def merge_nodes(req: MergeRequest):
 
     if not req.conflict_resolutions:
         conflict_scan_prompt = (
-            "You are a merge-conflict detection agent for two chat branches.\n"
-            "Find direct semantic contradictions that cannot both be true.\n"
-            "Return ONLY strict JSON array with max 5 conflicts.\n"
-            'Each item schema: {"id":"c1","left_claim":"...","right_claim":"...","why_conflict":"..."}\n'
-            "Return [] if no conflicts.\n\n"
-            "LEFT CONTEXT:\n"
-            f"{left_text}\n\n"
-            "RIGHT CONTEXT:\n"
-            f"{right_text}\n"
+            "Find the most important direct contradiction between these two branches, if any.\n"
+            "Return strict JSON array with at most 2 items, or [] if no real conflict.\n"
+            'Schema: [{"id":"c1","left_claim":"<10 words>","right_claim":"<10 words>","why_conflict":"<10 words>"}]\n\n'
+            f"LEFT:\n{left_text}\n\nRIGHT:\n{right_text}\n"
         )
         conflicts = []
         try:
@@ -461,11 +603,9 @@ async def merge_nodes(req: MergeRequest):
         if resolution_lines:
             resolution_context = "User-selected conflict resolutions:\n" + "\n".join(resolution_lines)
 
-    context_str = (
-        f"Left branch:\n{left_text}\n\n"
-        f"Right branch:\n{right_text}\n\n"
-        f"{resolution_context}"
-    )
+    context_str = "\n\n".join(node_texts)
+    if req.conflict_resolutions:
+        context_str += f"\n\n{resolution_context}"
     prompt = (
         "Synthesize these branches into one cohesive merged response.\n"
         "If conflict resolutions are provided, strictly honor them.\n\n"
@@ -480,7 +620,7 @@ async def merge_nodes(req: MergeRequest):
     new_node = Node(
         parent_ids=req.node_ids,
         root_id=req.root_id,
-        prompt="SYSTEM_MERGE_ACTION",
+        prompt="⎇ Merge Synthesis",
         response=summary,
         metadata={"type": "merge", "model": req.model}
     )
@@ -515,5 +655,5 @@ async def merge_roots(req: RootMergeRequest):
         response=summary,
         metadata={"type": "root_merge"}
     )
-    await nodes_collection.insert_one(new_node.model_dump()())
+    await nodes_collection.insert_one(new_node.model_dump())
     return {"message": "Roots unified", "new_root": req.new_root_name, "node_id": new_node.node_id}

@@ -10,7 +10,33 @@ body,
 }
 
 body {
-  background: #0B0B0C;
+  background: #1a1a1e;
   color: white;
   font-family: system-ui, sans-serif;
 }
+
+/* Light mode overrides */
+body.light {
+  background: #f0f0f2;
+  color: #111114;
+}
+
+/* Animated background particles */
+@keyframes float-slow {
+  0%, 100% { transform: translateY(0px) translateX(0px); opacity: 0.15; }
+  33%       { transform: translateY(-18px) translateX(8px); opacity: 0.25; }
+  66%       { transform: translateY(10px) translateX(-6px); opacity: 0.1; }
+}
+@keyframes float-med {
+  0%, 100% { transform: translateY(0px) translateX(0px); opacity: 0.1; }
+  50%       { transform: translateY(-24px) translateX(12px); opacity: 0.2; }
+}
+@keyframes float-fast {
+  0%, 100% { transform: translateY(0px); opacity: 0.08; }
+  50%       { transform: translateY(-12px); opacity: 0.18; }
+}
+
+.particle { position: absolute; border-radius: 50%; pointer-events: none; }
+.particle-slow  { animation: float-slow  8s ease-in-out infinite; }
+.particle-med   { animation: float-med   5s ease-in-out infinite; }
+.particle-fast  { animation: float-fast  3s ease-in-out infinite; }

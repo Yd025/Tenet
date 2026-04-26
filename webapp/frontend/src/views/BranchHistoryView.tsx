@@ -6,6 +6,7 @@ import { select } from 'd3-selection';
 import 'd3-transition';
 
 import { useConversationStore } from '../store/useConversationStore';
+import { useThemeStore } from '../store/useThemeStore';
 import { fetchMerge, fetchNodeSummaries } from '../api/client';
 import type { MergeConflict, MergeResolution } from '../api/client';
 import type { ConversationNode, ModelId } from '../types';
@@ -17,8 +18,8 @@ interface BranchHistoryViewProps {
   selectedModel: string;
 }
 
-const NODE_H_SPACING = 180;
-const NODE_V_SPACING = 90;
+const NODE_H_SPACING = 200;
+const NODE_V_SPACING = 70;
 
 interface TreeDatum {
   id: string;
@@ -40,23 +41,36 @@ function buildLabels(storeNodes: Record<string, ConversationNode>) {
     .filter((n) => !n.pruned)
     .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
+  let trunkCount = 0;
+  let branchCount = 0;
   const labelMap: Record<string, string> = {};
   const sublabelMap: Record<string, string> = {};
 
   for (const node of activeNodes) {
     const metadata = node.metadata ?? {};
-    const fallbackTitle = (node.prompt || (node.is_merge_node ? 'Merged node' : 'Conversation node'))
-      .trim()
-      .split(/\s+/)
-      .slice(0, 5)
-      .join(' ');
-    const fallbackSubtitle = (node.response || node.prompt || 'Node details')
-      .trim()
-      .split(/\s+/)
-      .slice(0, 20)
-      .join(' ');
-    labelMap[node.node_id] = (metadata.summary_title as string) || fallbackTitle;
-    sublabelMap[node.node_id] = (metadata.summary_subtitle as string) || fallbackSubtitle;
+    const promptSnippet = (node.prompt || '').trim().split(/\s+/).slice(0, 5).join(' ');
+    const responseSnippet = (node.response || '').trim().split(/\s+/).slice(0, 12).join(' ');
+
+    if (node.is_merge_node) {
+      trunkCount += 1;
+      const prefix = `v${trunkCount}`;
+      const summary = (metadata.summary_title as string) || 'Merge Synthesis';
+      labelMap[node.node_id] = `${prefix}: ${summary}`;
+      sublabelMap[node.node_id] = (metadata.summary_subtitle as string) || promptSnippet || '';
+    } else if (node.branch_label) {
+      branchCount += 1;
+      const parentLabel = node.parent_id ? (labelMap[node.parent_id]?.split(':')[0] ?? '?') : '?';
+      const prefix = `b${branchCount}/${parentLabel}`;
+      const summary = (metadata.summary_title as string) || promptSnippet || node.branch_label;
+      labelMap[node.node_id] = `${prefix}: ${summary}`;
+      sublabelMap[node.node_id] = (metadata.summary_subtitle as string) || responseSnippet || '';
+    } else {
+      trunkCount += 1;
+      const prefix = `v${trunkCount}`;
+      const summary = (metadata.summary_title as string) || promptSnippet || 'Node';
+      labelMap[node.node_id] = `${prefix}: ${summary}`;
+      sublabelMap[node.node_id] = (metadata.summary_subtitle as string) || responseSnippet || '';
+    }
   }
 
   return { labelMap, sublabelMap };
@@ -78,6 +92,7 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
   const selectNodeForMerge = useConversationStore((s) => s.selectNodeForMerge);
   const mergeNodes = useConversationStore((s) => s.mergeNodes);
   const clearMergeSelection = useConversationStore((s) => s.clearMergeSelection);
+  const isDark = useThemeStore((s) => s.isDark);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const gRef = useRef<SVGGElement>(null);
@@ -89,6 +104,7 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
   const [pendingMergePair, setPendingMergePair] = useState<{ a: string; b: string } | null>(null);
   const [mergeConflicts, setMergeConflicts] = useState<MergeConflict[]>([]);
   const [conflictResolutions, setConflictResolutions] = useState<Record<string, MergeResolution>>({});
+  const [mergeMode, setMergeMode] = useState(false);
   const [bookmarkedNodeIds, setBookmarkedNodeIds] = useState<Set<string>>(new Set());
   const [bookmarksExpanded, setBookmarksExpanded] = useState(true);
   const [hoverPreview, setHoverPreview] = useState<{ nodeId: string; x: number; y: number } | null>(null);
@@ -301,28 +317,27 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
   );
 
   async function handleMerge() {
-    if (selectedNodeIds.length !== 2) return;
-    const [a, b] = selectedNodeIds;
-    const rootId = activeConversationId ?? storeNodes[a]?.root_id ?? 'default';
+    if (selectedNodeIds.length < 2) return;
+    const rootId = activeConversationId ?? storeNodes[selectedNodeIds[0]]?.root_id ?? 'default';
 
     setMergeLoading(true);
     setMergeError(null);
     try {
-      const result = await fetchMerge({ node_id_a: a, node_id_b: b, root_id: rootId, model: selectedModel });
+      const result = await fetchMerge({ node_ids: selectedNodeIds, root_id: rootId, model: selectedModel });
       if (result.requires_resolution) {
         const defaults: Record<string, MergeResolution> = {};
         for (const c of result.conflicts) {
           defaults[c.id] = { id: c.id, choice: 'left' };
         }
-        setPendingMergePair({ a, b });
+        setPendingMergePair({ a: selectedNodeIds[0], b: selectedNodeIds[1] });
         setMergeConflicts(result.conflicts);
         setConflictResolutions(defaults);
         return;
       }
-      if (!result.node_id) {
-        throw new Error('Merge completed without node_id');
-      }
-      mergeNodes(a, b, result.response, result.node_id);
+      if (!result.node_id) throw new Error('Merge completed without node_id');
+      mergeNodes(selectedNodeIds[0], selectedNodeIds[1], result.response, result.node_id);
+      clearMergeSelection();
+      setMergeMode(false);
     } catch (err) {
       console.error('Merge failed:', err);
       setMergeError('Merge failed — check console for details.');
@@ -335,17 +350,12 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
     if (!pendingMergePair) return;
     const rootId = activeConversationId ?? storeNodes[pendingMergePair.a]?.root_id ?? 'default';
     const resolutions = Object.values(conflictResolutions);
-    if (resolutions.length !== mergeConflicts.length) {
-      setMergeError('Please resolve all conflicts before merging.');
-      return;
-    }
 
     setMergeLoading(true);
     setMergeError(null);
     try {
       const result = await fetchMerge({
-        node_id_a: pendingMergePair.a,
-        node_id_b: pendingMergePair.b,
+        node_ids: [pendingMergePair.a, pendingMergePair.b],
         root_id: rootId,
         model: selectedModel,
         conflict_resolutions: resolutions,
@@ -396,41 +406,73 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
 
   const nodeCount = Object.values(storeNodes).filter((n) => !n.pruned).length;
 
+  // All branch nodes are pink; merge nodes are purple; trunk is cyan
+  const firstBranchSet = useMemo(() => {
+    return new Set(
+      Object.values(storeNodes)
+        .filter((n) => !n.pruned && n.branch_label !== null)
+        .map((n) => n.node_id)
+    );
+  }, [storeNodes]);
+
   return (
-    <div className="flex-1 flex flex-col relative" style={{ background: '#0B0B0C' }}>
+    <div className="flex-1 flex flex-col relative" style={{ background: isDark ? '#1a1a1e' : '#f0f0f2' }}>
       {/* Header bar */}
       <div className="absolute top-3 left-3 right-3 z-10 flex items-center justify-between">
         <button
           onClick={() => setActiveTab('chats')}
-          className="text-xs text-tenet-teal underline hover:opacity-80 transition-opacity"
+          className={`text-xs underline hover:opacity-80 transition-opacity ${isDark ? 'text-[#2DD4BF]' : 'text-[#0d9488]'}`}
         >
           &larr; Back to Chats
         </button>
-        <span className="text-xs text-gray-600 font-mono">{nodeCount} node{nodeCount !== 1 ? 's' : ''}</span>
+        <div className="flex items-center gap-2">
+          {/* Merge mode toggle */}
+          <button
+            onClick={() => { setMergeMode((m) => !m); clearMergeSelection(); }}
+            className={`text-xs px-3 py-1.5 rounded-lg border transition-colors font-medium ${
+              mergeMode
+                ? 'bg-[#7c3aed] border-[#7c3aed] text-white'
+                : isDark
+                  ? 'border-[#1e1e24] text-gray-400 hover:text-white hover:border-gray-500'
+                  : 'border-gray-300 text-gray-500 hover:text-gray-800 hover:border-gray-400'
+            }`}
+          >
+            {mergeMode ? '⌥ Merge Mode ON' : '⌥ Merge Mode'}
+          </button>
+          <span className={`text-xs font-mono ${isDark ? 'text-gray-600' : 'text-gray-400'}`}>{nodeCount} node{nodeCount !== 1 ? 's' : ''}</span>
+        </div>
       </div>
 
       {/* Empty state */}
       {layoutNodes.length === 0 && (
         <div className="flex-1 flex items-center justify-center">
-          <p className="text-gray-600 text-sm">No conversation nodes yet. Start chatting to build your branch history.</p>
+          <p className={`text-sm ${isDark ? 'text-gray-600' : 'text-gray-400'}`}>No conversation nodes yet. Start chatting to build your branch history.</p>
         </div>
       )}
 
       {/* SVG canvas */}
-      <svg ref={svgRef} className="flex-1 w-full h-full" style={{ minHeight: 0 }}>
+      <svg ref={svgRef} className="flex-1 w-full h-full" style={{ minHeight: 0 }}
+        onClick={() => ctxMenu && setCtxMenu(null)}
+      >
         <g ref={gRef}>
           {layoutNodes.map((node) => {
             if (!node.parent) return null;
-            const isBranch = node.data.node.branch_label !== null || node.data.node.is_merge_node;
+            const n = node.data.node;
+            const isMerge = n.is_merge_node;
+            const isBranch = n.branch_label !== null;
+            const isFirst = firstBranchSet.has(n.node_id);
+            let stroke = '#2DD4BF';
+            if (isMerge) stroke = '#7c3aed';
+            else if (isBranch) stroke = isFirst ? '#ec4899' : '#2DD4BF';
             return (
               <path
                 key={`link-${node.data.id}`}
                 d={linkPath(node.parent.x, node.parent.y, node.x, node.y)}
                 fill="none"
-                stroke={isBranch ? '#7c3aed' : '#2DD4BF'}
+                stroke={stroke}
                 strokeWidth={1.5}
-                strokeDasharray={isBranch ? '6 3' : undefined}
-                opacity={isBranch ? 0.7 : 0.35}
+                strokeDasharray={isBranch || isMerge ? '6 3' : undefined}
+                opacity={isBranch || isMerge ? 0.7 : 0.35}
               />
             );
           })}
@@ -457,6 +499,8 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
               isMerge: d.is_merge_node,
               isSelected: selectedNodeIds.includes(d.node_id),
               isBookmarked: bookmarkedNodeIds.has(d.node_id),
+              isFirstBranch: firstBranchSet.has(d.node_id),
+              isInMergeMode: mergeMode,
               nodeId: d.node_id,
               ...handlers,
             };
@@ -477,11 +521,10 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
       {ctxMenu && (
         <div
           ref={ctxMenuRef}
-          className="fixed z-50 bg-tenet-surface border border-tenet-border rounded shadow-lg py-1 min-w-max"
-          style={{ left: ctxMenu.x, top: ctxMenu.y, boxShadow: '0 4px 16px rgba(0,0,0,0.6)' }}
+          className={`fixed z-50 border rounded shadow-lg py-1 min-w-max ${isDark ? 'bg-[#111114] border-[#1e1e24]' : 'bg-white border-gray-200'}`}          style={{ left: ctxMenu.x, top: ctxMenu.y, boxShadow: '0 4px 16px rgba(0,0,0,0.6)' }}
         >
           <button
-            className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-white/10 transition-colors"
+            className={`block w-full text-left px-4 py-2 text-sm hover:bg-white/10 transition-colors ${isDark ? 'text-white' : 'text-gray-800 hover:bg-black/5'}`}
             onClick={() => { handlers.onBranch(ctxMenu.nodeId); setCtxMenu(null); setActiveTab('chats'); }}
           >
             &#x238B; Branch from Here
@@ -494,7 +537,11 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
           </button>
           <button
             className="block w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-white/10 transition-colors"
-            onClick={() => { handlers.onPrune(ctxMenu.nodeId); setCtxMenu(null); }}
+            onClick={() => {
+              if (!confirm('Prune this node and all its descendants? This cannot be undone.')) return;
+              handlers.onPrune(ctxMenu.nodeId);
+              setCtxMenu(null);
+            }}
           >
             &#x2702; Prune
           </button>
@@ -509,89 +556,62 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
         </div>
       )}
 
-      {/* Conflict resolver modal */}
       {mergeConflicts.length > 0 && pendingMergePair && (
         <div className="absolute inset-0 z-40 bg-black/60 flex items-center justify-center px-4">
-          <div className="w-full max-w-3xl max-h-[80vh] overflow-auto bg-tenet-surface border border-tenet-border rounded-xl p-4">
+          <div className={`w-full max-w-lg border rounded-xl p-4 ${isDark ? 'bg-[#111114] border-[#1e1e24]' : 'bg-white border-gray-200'}`}>
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-semibold text-white">Resolve Merge Conflicts</h3>
-              <button
-                className="text-gray-400 hover:text-white"
-                onClick={() => {
-                  setPendingMergePair(null);
-                  setMergeConflicts([]);
-                  setConflictResolutions({});
-                }}
-              >
-                ✕
-              </button>
+              <h3 className={`text-sm font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>Resolve Conflicts</h3>
+              <button className={isDark ? 'text-gray-400 hover:text-white' : 'text-gray-400 hover:text-gray-900'}
+                onClick={() => { setPendingMergePair(null); setMergeConflicts([]); setConflictResolutions({}); }}>✕</button>
             </div>
-            <p className="text-xs text-gray-400 mb-4">
-              Conflicting ideas were detected. Choose how each conflict should be resolved before merge.
-            </p>
 
-            <div className="space-y-3">
+            <div className="space-y-2">
               {mergeConflicts.map((conflict) => {
                 const resolution = conflictResolutions[conflict.id];
                 return (
-                  <div key={conflict.id} className="border border-tenet-border rounded-lg p-3 bg-black/20">
-                    <p className="text-xs text-gray-300 mb-2">{conflict.why_conflict || 'Potential contradiction detected.'}</p>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
-                      <div className="border border-teal-500/30 bg-teal-500/5 rounded-md p-2">
-                        <div className="text-[11px] uppercase tracking-wide text-teal-300 mb-1">Left</div>
-                        <div className="text-xs text-gray-100 leading-relaxed">{conflict.left_claim}</div>
-                      </div>
-                      <div className="border border-purple-500/30 bg-purple-500/5 rounded-md p-2">
-                        <div className="text-[11px] uppercase tracking-wide text-purple-300 mb-1">Right</div>
-                        <div className="text-xs text-gray-100 leading-relaxed">{conflict.right_claim}</div>
-                      </div>
-                    </div>
-
-                    <div className="flex gap-2 mb-2">
+                  <div key={conflict.id} className={`border rounded-lg p-3 ${isDark ? 'border-[#1e1e24]' : 'border-gray-200'}`}>
+                    <p className={`text-xs mb-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{conflict.why_conflict}</p>
+                    <div className="grid grid-cols-2 gap-2 mb-2">
                       <button
-                        className={`px-2 py-1 text-xs rounded border ${resolution?.choice === 'left' ? 'border-teal-400 text-teal-300' : 'border-tenet-border text-gray-300'}`}
                         onClick={() => setConflictResolutions((prev) => ({ ...prev, [conflict.id]: { id: conflict.id, choice: 'left' } }))}
+                        className={`text-xs rounded-lg p-2 border text-left transition-colors ${
+                          resolution?.choice === 'left'
+                            ? 'border-teal-400 bg-teal-500/10 text-teal-300'
+                            : isDark ? 'border-[#1e1e24] text-gray-300 hover:border-gray-500' : 'border-gray-200 text-gray-700 hover:border-gray-400'
+                        }`}
                       >
-                        Keep Left
+                        <div className="text-[10px] uppercase tracking-wide mb-0.5 opacity-60">Left</div>
+                        {conflict.left_claim}
                       </button>
                       <button
-                        className={`px-2 py-1 text-xs rounded border ${resolution?.choice === 'right' ? 'border-purple-400 text-purple-300' : 'border-tenet-border text-gray-300'}`}
                         onClick={() => setConflictResolutions((prev) => ({ ...prev, [conflict.id]: { id: conflict.id, choice: 'right' } }))}
+                        className={`text-xs rounded-lg p-2 border text-left transition-colors ${
+                          resolution?.choice === 'right'
+                            ? 'border-purple-400 bg-purple-500/10 text-purple-300'
+                            : isDark ? 'border-[#1e1e24] text-gray-300 hover:border-gray-500' : 'border-gray-200 text-gray-700 hover:border-gray-400'
+                        }`}
                       >
-                        Keep Right
-                      </button>
-                      <button
-                        className={`px-2 py-1 text-xs rounded border ${resolution?.choice === 'custom' ? 'border-amber-400 text-amber-300' : 'border-tenet-border text-gray-300'}`}
-                        onClick={() =>
-                          setConflictResolutions((prev) => ({
-                            ...prev,
-                            [conflict.id]: {
-                              id: conflict.id,
-                              choice: 'custom',
-                              custom_resolution: prev[conflict.id]?.custom_resolution ?? '',
-                            },
-                          }))
-                        }
-                      >
-                        Custom
+                        <div className="text-[10px] uppercase tracking-wide mb-0.5 opacity-60">Right</div>
+                        {conflict.right_claim}
                       </button>
                     </div>
-
+                    <button
+                      onClick={() => setConflictResolutions((prev) => ({ ...prev, [conflict.id]: { id: conflict.id, choice: 'custom', custom_resolution: prev[conflict.id]?.custom_resolution ?? '' } }))}
+                      className={`w-full text-xs rounded-lg px-2 py-1.5 border text-left transition-colors ${
+                        resolution?.choice === 'custom'
+                          ? 'border-amber-400 bg-amber-500/10 text-amber-300'
+                          : isDark ? 'border-[#1e1e24] text-gray-400 hover:border-gray-500' : 'border-gray-200 text-gray-500 hover:border-gray-400'
+                      }`}
+                    >
+                      ✏ Custom resolution
+                    </button>
                     {resolution?.choice === 'custom' && (
                       <textarea
                         value={resolution.custom_resolution ?? ''}
-                        onChange={(e) =>
-                          setConflictResolutions((prev) => ({
-                            ...prev,
-                            [conflict.id]: {
-                              id: conflict.id,
-                              choice: 'custom',
-                              custom_resolution: e.target.value,
-                            },
-                          }))
-                        }
-                        className="w-full text-xs bg-black/30 border border-tenet-border rounded p-2 text-gray-100"
-                        placeholder="Describe your preferred merged truth for this conflict..."
+                        onChange={(e) => setConflictResolutions((prev) => ({ ...prev, [conflict.id]: { id: conflict.id, choice: 'custom', custom_resolution: e.target.value } }))}
+                        className={`mt-2 w-full text-xs rounded p-2 border resize-none ${isDark ? 'bg-black/30 border-[#1e1e24] text-gray-100 placeholder-gray-600' : 'bg-white border-gray-200 text-gray-800 placeholder-gray-400'}`}
+                        rows={2}
+                        placeholder="Describe how to resolve this conflict..."
                       />
                     )}
                   </div>
@@ -599,23 +619,15 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
               })}
             </div>
 
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                className="px-3 py-1.5 text-xs rounded border border-tenet-border text-gray-300 hover:text-white"
-                onClick={() => {
-                  setPendingMergePair(null);
-                  setMergeConflicts([]);
-                  setConflictResolutions({});
-                }}
-              >
+            <div className="mt-3 flex justify-end gap-2">
+              <button className={`px-3 py-1.5 text-xs rounded border ${isDark ? 'border-[#1e1e24] text-gray-400 hover:text-white' : 'border-gray-200 text-gray-500 hover:text-gray-900'}`}
+                onClick={() => { setPendingMergePair(null); setMergeConflicts([]); setConflictResolutions({}); }}>
                 Cancel
               </button>
               <button
-                className="px-3 py-1.5 text-xs rounded bg-tenet-teal text-black font-semibold hover:opacity-90 disabled:opacity-50"
-                onClick={handleResolveAndMerge}
-                disabled={mergeLoading}
-              >
-                {mergeLoading ? 'Merging…' : 'Resolve and Merge'}
+                className="px-3 py-1.5 text-xs rounded bg-[#7c3aed] text-white font-semibold hover:opacity-90 disabled:opacity-50"
+                onClick={handleResolveAndMerge} disabled={mergeLoading}>
+                {mergeLoading ? 'Merging…' : 'Merge'}
               </button>
             </div>
           </div>
@@ -625,108 +637,93 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
       {/* Small hover preview */}
       {hoverPreview && storeNodes[hoverPreview.nodeId] && (
         <div
-          className="fixed z-40 w-80 max-w-[85vw] border border-tenet-border rounded-lg bg-tenet-surface/95 backdrop-blur px-3 py-2 pointer-events-none"
+          className={`fixed z-40 w-80 max-w-[85vw] border rounded-lg backdrop-blur px-3 py-2 pointer-events-none ${
+            isDark ? 'border-[#1e1e24] bg-[#111114]/95' : 'border-gray-200 bg-white/95 shadow-lg'
+          }`}
           style={{ left: hoverPreview.x, top: hoverPreview.y }}
         >
-          <div className="text-xs font-semibold text-white truncate">
+          <div className={`text-xs font-semibold truncate ${isDark ? 'text-white' : 'text-gray-900'}`}>
             {(storeNodes[hoverPreview.nodeId].metadata?.summary_title as string) || 'Node Preview'}
           </div>
-          <div className="mt-1 text-[11px] text-gray-200">
+          <div className={`mt-1 text-[11px] ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>
             {storeNodes[hoverPreview.nodeId].prompt.slice(0, 120)}
             {storeNodes[hoverPreview.nodeId].prompt.length > 120 ? '…' : ''}
           </div>
-          <div className="mt-1 text-[11px] text-gray-300">
+          <div className={`mt-1 text-[11px] ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
             {storeNodes[hoverPreview.nodeId].response.slice(0, 220)}
             {storeNodes[hoverPreview.nodeId].response.length > 220 ? '…' : ''}
           </div>
         </div>
       )}
 
-      {/* Floating action bar */}
-      {selectedNodeIds.length >= 1 && (
+      {/* Floating action bar — only shown in merge mode */}
+      {mergeMode && (
         <div
-          className="absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-3 items-center bg-tenet-surface border border-tenet-border rounded-lg px-4 py-2 shadow-xl z-20"
-          style={{ boxShadow: '0 4px 24px rgba(0,0,0,0.7)' }}
+          className={`absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-3 items-center border rounded-lg px-4 py-2 shadow-xl z-20 ${
+            isDark ? 'bg-[#111114] border-[#1e1e24]' : 'bg-white border-gray-200'
+          }`}
+          style={{ boxShadow: '0 4px 24px rgba(0,0,0,0.3)' }}
         >
-          {/* Selection indicator */}
-          <span className="text-xs text-gray-500 font-mono">
-            {selectedNodeIds.length}/2 selected
+          <span className={`text-xs font-mono ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+            {selectedNodeIds.length}/5 selected
           </span>
 
-          {selectedNodeIds.length === 2 && (
+          {selectedNodeIds.length >= 2 && (
             <button
               onClick={handleMerge}
               disabled={mergeLoading}
-              className={`px-4 py-1.5 rounded bg-tenet-teal text-black font-semibold text-sm transition-opacity ${
-                mergeLoading ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-90'
+              className={`px-4 py-1.5 rounded font-semibold text-sm transition-opacity text-white ${
+                mergeLoading ? 'opacity-50 cursor-not-allowed bg-[#7c3aed]' : 'bg-[#7c3aed] hover:opacity-90'
               }`}
             >
               {mergeLoading ? (
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="w-3 h-3 border-2 border-black/30 border-t-black rounded-full animate-spin" />
+                  <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                   Merging…
                 </span>
               ) : (
-                '⌥ Merge Nodes'
+                `⌥ Merge ${selectedNodeIds.length} Nodes`
               )}
             </button>
           )}
 
-          {selectedNodeIds.length === 1 && (
-            <>
-              <button
-                onClick={handleBranchFromSelected}
-                className="px-4 py-1.5 rounded bg-tenet-purple text-white font-semibold text-sm hover:opacity-90 transition-opacity"
-              >
-                &#x238B; Branch from Here
-              </button>
-              <button
-                onClick={() => toggleBookmark(selectedNodeIds[0])}
-                className="px-4 py-1.5 rounded border border-amber-500/50 text-amber-400 font-semibold text-sm hover:bg-amber-500/10 transition-colors"
-              >
-                {bookmarkedNodeIds.has(selectedNodeIds[0]) ? '★ Unbookmark' : '☆ Bookmark'}
-              </button>
-            </>
-          )}
-
-          {selectedNodeIds.length === 2 && selectedNodeIds.some((id) => !bookmarkedNodeIds.has(id)) && (
-            <button
-              onClick={() => selectedNodeIds.forEach((id) => {
-                if (!bookmarkedNodeIds.has(id)) toggleBookmark(id);
-              })}
-              className="px-3 py-1.5 rounded border border-amber-500/50 text-amber-400 text-sm hover:bg-amber-500/10 transition-colors"
-            >
-              ☆ Bookmark Both
-            </button>
+          {selectedNodeIds.length === 0 && (
+            <span className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+              Click nodes to select (2–5)
+            </span>
           )}
 
           <button
-            onClick={clearMergeSelection}
-            className="text-gray-400 text-xs hover:text-white transition-colors"
+            onClick={() => { clearMergeSelection(); setMergeMode(false); }}
+            className={`text-xs transition-colors ${isDark ? 'text-gray-400 hover:text-white' : 'text-gray-400 hover:text-gray-900'}`}
           >
-            Clear
+            Cancel
           </button>
         </div>
       )}
 
       {/* Bookmarks card */}
       <div
-        className="absolute bottom-4 right-4 z-20 w-64 bg-tenet-surface border border-tenet-border rounded-lg shadow-xl overflow-hidden"
-        style={{ boxShadow: '0 4px 24px rgba(0,0,0,0.7)' }}
+        className={`absolute bottom-4 right-4 z-20 w-80 border rounded-lg shadow-xl overflow-hidden ${
+          isDark ? 'bg-[#111114] border-[#1e1e24]' : 'bg-white border-gray-200'
+        }`}
+        style={{ boxShadow: '0 4px 24px rgba(0,0,0,0.3)' }}
       >
         <button
-          className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-white hover:bg-white/5 transition-colors"
+          className={`w-full flex items-center justify-between px-4 py-3 text-sm font-semibold transition-colors ${
+            isDark ? 'text-white hover:bg-white/5' : 'text-gray-800 hover:bg-gray-50'
+          }`}
           onClick={() => setBookmarksExpanded((v) => !v)}
         >
           <span>★ Bookmarks ({bookmarkedNodeIds.size})</span>
-          <span className="text-gray-500">{bookmarksExpanded ? '▾' : '▸'}</span>
+          <span className={isDark ? 'text-gray-500' : 'text-gray-400'}>{bookmarksExpanded ? '▾' : '▸'}</span>
         </button>
 
         {bookmarksExpanded && (
-          <div className="max-h-52 overflow-y-auto border-t border-tenet-border">
+          <div className={`max-h-64 overflow-y-auto border-t ${isDark ? 'border-[#1e1e24]' : 'border-gray-200'}`}>
             {bookmarkedNodeIds.size === 0 ? (
-              <p className="text-[10px] text-gray-600 px-3 py-2">
-                No bookmarks yet. Select a node and click Bookmark, or right-click a node.
+              <p className={`text-xs px-4 py-3 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                No bookmarks yet. Right-click a node to bookmark it.
               </p>
             ) : (
               [...bookmarkedNodeIds].map((nodeId) => {
@@ -735,20 +732,19 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
                 return (
                   <div
                     key={nodeId}
-                    className="flex items-center gap-2 px-3 py-1.5 hover:bg-white/5 transition-colors group"
+                    className={`flex items-center gap-2 px-4 py-2.5 transition-colors group ${
+                      isDark ? 'hover:bg-white/5' : 'hover:bg-gray-50'
+                    }`}
                   >
                     <button
                       className="flex-1 text-left min-w-0"
-                      onClick={() => {
-                        panToNode(nodeId);
-                        checkoutNode(nodeId);
-                      }}
+                      onClick={() => { panToNode(nodeId); checkoutNode(nodeId); }}
                     >
-                      <div className="text-xs text-white font-medium truncate">{label}</div>
-                      <div className="text-[10px] text-gray-500 truncate">{sublabel}</div>
+                      <div className={`text-sm font-medium truncate ${isDark ? 'text-white' : 'text-gray-900'}`}>{label}</div>
+                      <div className={`text-xs truncate mt-0.5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>{sublabel}</div>
                     </button>
                     <button
-                      className="text-gray-600 hover:text-amber-400 text-xs opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                      className="text-gray-600 hover:text-amber-400 text-sm opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
                       onClick={() => toggleBookmark(nodeId)}
                       title="Remove bookmark"
                     >

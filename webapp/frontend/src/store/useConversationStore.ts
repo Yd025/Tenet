@@ -8,6 +8,8 @@ interface ConversationStore {
   headNodeId: string | null;
   selectedNodeIds: string[];
   autoBranchingEnabled: boolean;
+  lastMessageAt: number; // increments on each commit to trigger sidebar refresh
+  lastTps: number | null;
 
   // actions
   loadNodes: (nodes: ConversationNode[]) => void;
@@ -16,7 +18,6 @@ interface ConversationStore {
     prompt: string,
     response: string,
     model: ModelId,
-    isSensitive: boolean,
     backendNodeId?: string,
     parentNodeId?: string | null,
   ) => void;
@@ -33,6 +34,8 @@ interface ConversationStore {
   clearMergeSelection: () => void;
   setActiveConversation: (id: string | null) => void;
   setAutoBranchingEnabled: (enabled: boolean) => void;
+  deleteLocalConversation: (id: string) => void;
+  setLastTps: (tps: number) => void;
   getThreadToHead: () => ConversationNode[];
 }
 
@@ -56,6 +59,8 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
   headNodeId: null,
   selectedNodeIds: [],
   autoBranchingEnabled: false,
+  lastMessageAt: 0,
+  lastTps: null,
 
   // Load nodes fetched from the backend into the store.
   // Reconstructs children_ids from parent_ids since the backend doesn't store them.
@@ -86,8 +91,28 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       }
     }
 
+    // Infer branch_label for nodes that diverge from the trunk.
+    // Sort by timestamp — the first non-merge child of each parent is trunk, subsequent are branches.
+    const sortedNodes = Object.values(nodes).sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+    const firstNonMergeChildSeen = new Set<string>();
+    for (const n of sortedNodes) {
+      if (n.is_merge_node || !n.parent_id || n.branch_label) continue;
+      if (firstNonMergeChildSeen.has(n.parent_id)) {
+        nodes[n.node_id] = { ...nodes[n.node_id], branch_label: 'Branch' };
+      } else {
+        firstNonMergeChildSeen.add(n.parent_id);
+      }
+    }
+
     const leaves = Object.values(nodes).filter((n) => n.children_ids.length === 0 && !n.pruned);
-    const head = leaves.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+    // Sort by timestamp descending — most recently active leaf becomes head
+    const head = leaves.sort((a, b) => {
+      const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+      const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+      return tb - ta;
+    })[0];
 
     set((state) => ({
       nodes,
@@ -118,11 +143,9 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     prompt: string,
     response: string,
     model: ModelId,
-    isSensitive: boolean,
     backendNodeId?: string,
     parentNodeId?: string | null,
   ) => {
-    // Use the backend's node_id so the local store stays in sync with MongoDB
     const nodeId = backendNodeId ?? crypto.randomUUID();
     const timestamp = new Date().toISOString();
 
@@ -131,11 +154,12 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       if (!activeConversationId) return {};
       const effectiveParentId = parentNodeId === undefined ? headNodeId : parentNodeId;
 
-      // If the parent already has children, this commit is a branch
-      const parentHasChildren =
+      const parentHasNonMergeChildren =
         effectiveParentId != null &&
         state.nodes[effectiveParentId] != null &&
-        state.nodes[effectiveParentId].children_ids.length > 0;
+        state.nodes[effectiveParentId].children_ids.some(
+          (cid) => !state.nodes[cid]?.is_merge_node
+        );
 
       const newNode: ConversationNode = {
         node_id: nodeId,
@@ -149,8 +173,8 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
         response,
         model_used: model,
         execution_context: 'local',
-        is_sensitive: isSensitive,
-        branch_label: parentHasChildren ? 'Branch' : null,
+        is_sensitive: false,
+        branch_label: parentHasNonMergeChildren ? 'Branch' : null,
         is_merge_node: false,
         pruned: false,
         timestamp,
@@ -176,6 +200,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
         nodes: updatedNodes,
         conversations: updatedConversations,
         headNodeId: nodeId,
+        lastMessageAt: Date.now(),
       };
     });
   },
@@ -187,20 +212,14 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
   // Branching moves HEAD to the target node so the next commit becomes its child.
   // We also store the intended branch target so loadNodes doesn't overwrite it.
   branchFromNode: (nodeId: string, _label: string): string => {
-    set((state) => {
-      // If the node exists in the store, set head directly.
-      // If not yet loaded (race with loadNodes), still set it — loadNodes will preserve it.
-      if (state.nodes[nodeId] || true) {
-        return { headNodeId: nodeId };
-      }
-      return {};
-    });
+    set({ headNodeId: nodeId });
     return nodeId;
   },
 
   pruneNode: (nodeId: string) => {
+    const allIds = collectDescendants(nodeId, get().nodes);
+
     set((state) => {
-      const allIds = collectDescendants(nodeId, state.nodes);
       const updatedNodes = { ...state.nodes };
 
       for (const id of allIds) {
@@ -226,6 +245,11 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
 
       return { nodes: updatedNodes, headNodeId: newHeadNodeId };
     });
+
+    // Persist to backend so pruned state survives navigation
+    import('../api/client').then(({ bulkDeleteNodes }) => {
+      bulkDeleteNodes(allIds, false).catch(() => {});
+    });
   },
 
   mergeNodes: (
@@ -246,7 +270,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       merge_parent_id: nodeIdB,
       parent_ids: [nodeIdA, nodeIdB],
       children_ids: [],
-      prompt: `[Merge of ${nodeIdA.slice(0, 8)} and ${nodeIdB.slice(0, 8)}]`,
+      prompt: `⎇ Merge Synthesis`,
       response: synthesisResponse,
       model_used: 'gemma4',
       execution_context: 'local',
@@ -281,7 +305,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       if (selectedNodeIds.includes(nodeId)) {
         return { selectedNodeIds: selectedNodeIds.filter((id) => id !== nodeId) };
       }
-      if (selectedNodeIds.length >= 2) return {};
+      if (selectedNodeIds.length >= 5) return {}; // max 5
       return { selectedNodeIds: [...selectedNodeIds, nodeId] };
     });
   },
@@ -296,6 +320,17 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
 
   setAutoBranchingEnabled: (enabled: boolean) => {
     set({ autoBranchingEnabled: enabled });
+  },
+
+  setLastTps: (tps: number) => {
+    set({ lastTps: tps });
+  },
+
+  deleteLocalConversation: (id: string) => {
+    set((state) => ({
+      conversations: state.conversations.filter((c) => c.id !== id),
+      ...(state.activeConversationId === id ? { activeConversationId: null, nodes: {}, headNodeId: null } : {}),
+    }));
   },
 
   getThreadToHead: (): ConversationNode[] => {

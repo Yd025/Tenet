@@ -1,6 +1,8 @@
-import { useState } from 'react';
-import { ChevronRight, ChevronDown, PanelLeft } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { ChevronRight, ChevronDown, PanelLeft, Sun, Moon } from 'lucide-react';
 import { useConversationStore } from '../store/useConversationStore';
+import { useThemeStore } from '../store/useThemeStore';
+import { fetchConversation } from '../api/client';
 
 interface TopNavProps {
   activeTab: 'chats' | 'branch-history';
@@ -12,105 +14,133 @@ interface TopNavProps {
 }
 
 const MODEL_LABELS: Record<string, string> = {
-  gemma4: 'Gemma 4',
-  deepseek: 'DeepSeek R1',
-  qwen: 'Qwen 2.5',
+  'gemma4:latest': 'Gemma 4',
+  'gemma4:e4b': 'Gemma 4 E4B',
+  'qwen3.6:latest': 'Qwen 3.6',
+  'qwen3.5:9b': 'Qwen 3.5 9B',
+  'mistral-small3.2:24b': 'Mistral Small 3.2 24B',
+  'ministral-3:8b': 'Ministral 3 8B',
 };
 
-const MODELS = ['gemma4', 'deepseek', 'qwen'];
+const MODELS = [
+  'gemma4:latest',
+  'gemma4:e4b',
+  'qwen3.6:latest',
+  'qwen3.5:9b',
+  'mistral-small3.2:24b',
+  'ministral-3:8b',
+];
 
 export default function TopNav({
-  activeTab,
-  setActiveTab,
-  selectedModel,
-  setSelectedModel,
-  sidebarOpen,
-  onToggleSidebar,
+  activeTab, setActiveTab, selectedModel, setSelectedModel, sidebarOpen, onToggleSidebar,
 }: TopNavProps) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [dbTitle, setDbTitle] = useState<string | null>(null);
+  const { isDark, toggle } = useThemeStore();
 
   const activeConversationId = useConversationStore((s) => s.activeConversationId);
   const conversations = useConversationStore((s) => s.conversations);
-
   const activeConversation = conversations.find((c) => c.id === activeConversationId);
-  const conversationTitle = activeConversation?.title ?? 'Untitled';
+
+  // Fetch title from DB for conversations not in local store
+  useEffect(() => {
+    if (!activeConversationId) { setDbTitle(null); return; }
+    if (activeConversation) { setDbTitle(null); return; } // local store has it
+    fetchConversation(activeConversationId)
+      .then((data) => setDbTitle(data.title))
+      .catch(() => setDbTitle(null));
+  }, [activeConversationId, activeConversation]);
+
+  const conversationTitle = activeConversation?.title ?? dbTitle ?? '';
+
+  const surface = isDark ? 'bg-[#111114] border-[#1e1e24]' : 'bg-white border-gray-200';
+  const teal = isDark ? 'text-[#2DD4BF] border-[#2DD4BF]' : 'text-[#0d9488] border-[#0d9488]';
+  const textMuted = isDark ? 'text-gray-500' : 'text-gray-600';
+  const textBase = isDark ? 'text-white' : 'text-gray-800';
+  const hoverBg = isDark ? 'hover:bg-white/5 hover:text-white' : 'hover:bg-gray-100 hover:text-gray-900';
 
   return (
-    <div className="bg-tenet-surface border-b border-tenet-border h-12 flex items-center px-3 gap-3 flex-shrink-0">
-      {/* Sidebar toggle */}
-      <button
-        onClick={onToggleSidebar}
-        className={`p-1.5 rounded transition-colors ${
-          sidebarOpen
-            ? 'text-gray-500 hover:text-white hover:bg-white/5'
-            : 'text-tenet-teal hover:bg-tenet-teal/10'
-        }`}
-        title={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
-      >
-        <PanelLeft size={16} />
-      </button>
-
-      {/* Breadcrumb */}
-      <div className="flex items-center gap-1 flex-shrink-0">
-        <span className="text-gray-500 text-sm">Conversations</span>
-        <ChevronRight className="text-gray-600" size={12} />
-        <span className="text-white text-sm font-medium truncate max-w-[200px]">
-          {conversationTitle}
-        </span>
-      </div>
-
-      {/* Tab switcher — centered */}
-      <div className="flex items-center gap-1 mx-auto">
+    <div className={`border-b h-12 flex items-center px-3 gap-2 flex-shrink-0 relative z-20 ${surface}`}>
+      {/* Left: sidebar toggle + breadcrumb */}
+      <div className="flex items-center gap-2 min-w-0 flex-1">
         <button
-          onClick={() => setActiveTab('chats')}
-          className={`text-sm px-3 py-1 pb-0.5 border-b-2 transition-colors ${
-            activeTab === 'chats'
-              ? 'border-tenet-teal text-tenet-teal'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
+          onClick={onToggleSidebar}
+          className={`p-1.5 rounded transition-colors flex-shrink-0 ${sidebarOpen ? `${textMuted} ${hoverBg}` : `${teal} ${isDark ? 'hover:bg-[#2DD4BF]/10' : 'hover:bg-[#0d9488]/10'}`}`}
+          title={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
         >
-          Chats
+          <PanelLeft size={16} />
         </button>
-        <button
-          onClick={() => setActiveTab('branch-history')}
-          className={`text-sm px-3 py-1 pb-0.5 border-b-2 transition-colors ${
-            activeTab === 'branch-history'
-              ? 'border-tenet-teal text-tenet-teal'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          Branch History
-        </button>
-      </div>
-
-      {/* Model selector */}
-      <div className="relative flex-shrink-0">
-        <button
-          onClick={() => setDropdownOpen((o) => !o)}
-          className="flex items-center gap-1.5 text-xs border border-tenet-border rounded-lg px-3 py-1.5 bg-tenet-bg text-gray-300 hover:text-white hover:border-gray-500 transition-colors"
-        >
-          <span className="text-gray-500 mr-0.5">Model:</span>
-          {MODEL_LABELS[selectedModel] ?? selectedModel}
-          <ChevronDown size={12} />
-        </button>
-        {dropdownOpen && (
-          <div className="absolute right-0 top-full mt-1 bg-tenet-surface border border-tenet-border rounded-lg shadow-lg z-10 min-w-[140px] overflow-hidden">
-            {MODELS.map((model) => (
-              <button
-                key={model}
-                onClick={() => {
-                  setSelectedModel(model);
-                  setDropdownOpen(false);
-                }}
-                className={`block w-full text-left px-3 py-2 text-sm hover:bg-white/5 transition-colors ${
-                  model === selectedModel ? 'text-tenet-teal' : 'text-gray-300'
-                }`}
-              >
-                {MODEL_LABELS[model]}
-              </button>
-            ))}
+        {conversationTitle && (
+          <div className="flex items-center gap-1 min-w-0">
+            <span className={`text-sm flex-shrink-0 ${textMuted}`}>Conversations</span>
+            <ChevronRight className={`flex-shrink-0 ${textMuted}`} size={12} />
+            <span className={`text-sm font-semibold truncate ${isDark ? 'text-[#2DD4BF]' : 'text-[#0d9488]'}`}>
+              {conversationTitle}
+            </span>
           </div>
         )}
+      </div>
+
+      {/* Center: tabs — absolutely centered so left/right content never shifts them */}
+      <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-1">
+        {(['chats', 'branch-history'] as const).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={`text-sm px-3 py-1 pb-0.5 border-b-2 transition-colors whitespace-nowrap ${
+              activeTab === tab
+                ? `${isDark ? 'border-[#2DD4BF] text-[#2DD4BF]' : 'border-[#0d9488] text-[#0d9488]'}`
+                : `border-transparent ${textMuted} ${hoverBg}`
+            }`}
+          >
+            {tab === 'chats' ? 'Chats' : 'Branch History'}
+          </button>
+        ))}
+      </div>
+
+      {/* Right: theme toggle + model selector */}
+      <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
+        <button
+          onClick={toggle}
+          className={`p-1.5 rounded transition-colors flex-shrink-0 ${textMuted} ${hoverBg}`}
+          title="Toggle light/dark"
+        >
+          {isDark ? <Sun size={15} /> : <Moon size={15} />}
+        </button>
+
+        <div className="relative flex-shrink-0">
+          <button
+            onClick={() => setDropdownOpen((o) => !o)}
+            className={`flex items-center gap-1.5 text-xs border rounded-lg px-3 py-1.5 transition-colors whitespace-nowrap ${
+              isDark
+                ? 'border-[#1e1e24] bg-[#1a1a1e] text-gray-300 hover:text-white hover:border-gray-500'
+                : 'border-gray-200 bg-gray-50 text-gray-600 hover:text-gray-900 hover:border-gray-400'
+            }`}
+          >
+            <span className={`mr-0.5 ${textMuted}`}>Model:</span>
+            {MODEL_LABELS[selectedModel] ?? selectedModel}
+            <ChevronDown size={12} />
+          </button>
+          {dropdownOpen && (
+            <div className={`absolute right-0 top-full mt-1 border rounded-lg shadow-lg z-50 min-w-max overflow-hidden ${
+              isDark ? 'bg-[#111114] border-[#1e1e24]' : 'bg-white border-gray-200'
+            }`}>
+              {MODELS.map((model) => (
+                <button
+                  key={model}
+                  onClick={() => { setSelectedModel(model); setDropdownOpen(false); }}
+                  className={`block w-full text-left px-3 py-2 text-sm transition-colors whitespace-nowrap ${
+                    model === selectedModel
+                      ? isDark ? 'text-[#2DD4BF]' : 'text-[#0d9488]'
+                      : `${textBase} ${hoverBg}`
+                  }`}
+                >
+                  {MODEL_LABELS[model]}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

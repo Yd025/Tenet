@@ -33,7 +33,7 @@ export interface Conversation {
 
 export interface TelemetryStats {
   temp_c?: number;
-  vram_gb?: number;
+  gpu_clock_mhz?: number;
   utilization?: number;
   active_nodes: number;
   tps?: number;

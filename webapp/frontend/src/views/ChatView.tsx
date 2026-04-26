@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useConversationStore } from '../store/useConversationStore';
+import { useThemeStore } from '../store/useThemeStore';
 import { streamChat } from '../api/client';
 import type { ModelId, ConversationNode } from '../types';
 import MessageBubble from '../components/MessageBubble';
@@ -15,9 +16,11 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [streamingText, setStreamingText] = useState('');
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
+  const [failedPrompt, setFailedPrompt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const isStreamingRef = useRef(false);
 
   const nodes = useConversationStore((s) => s.nodes);
   const headNodeId = useConversationStore((s) => s.headNodeId);
@@ -25,6 +28,9 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
   const commitMessage = useConversationStore((s) => s.commitMessage);
   const autoBranchingEnabled = useConversationStore((s) => s.autoBranchingEnabled);
   const setAutoBranchingEnabled = useConversationStore((s) => s.setAutoBranchingEnabled);
+  const setLastTps = useConversationStore((s) => s.setLastTps);
+  const bumpLastMessageAt = () => useConversationStore.setState((s) => ({ lastMessageAt: Date.now() }));
+  const isDark = useThemeStore((s) => s.isDark);
 
   const thread = useMemo(() => {
     if (!headNodeId) return [];
@@ -40,10 +46,28 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
   }, [nodes, headNodeId]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [thread, streamingText]);
+    if (isStreamingRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'instant' });
+    } else {
+      const id = setTimeout(() => {
+        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 50);
+      return () => clearTimeout(id);
+    }
+  }, [thread, streamingText, pendingPrompt]);
 
-  const handleCommit = async (prompt: string, isSensitive: boolean) => {
+  // Abort any in-flight stream when the conversation changes
+  useEffect(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsLoading(false);
+    setStreamingText('');
+    setPendingPrompt(null);
+    setFailedPrompt(null);
+    setError(null);
+  }, [activeConversationId]);
+
+  const handleCommit = async (prompt: string) => {
     if (!activeConversationId) return;
 
     // Cancel any in-flight request
@@ -55,10 +79,13 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
     setStreamingText('');
     setPendingPrompt(prompt);
     setError(null);
+    isStreamingRef.current = true;
+    bumpLastMessageAt(); // move conversation to top of sidebar immediately
 
     let fullText = '';
     let backendNodeId: string | null = null;
     let backendParentId: string | null = null;
+    let lastChunkTps = 0;
 
     try {
       const streamResult = await streamChat(
@@ -73,8 +100,13 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
         (chunk) => {
           fullText += chunk.token;
           setStreamingText(fullText);
+          if (chunk.tps > 0) lastChunkTps = chunk.tps;
         },
       );
+      backendNodeId = streamResult.nodeId;
+      backendParentId = streamResult.parentId;
+
+      if (lastChunkTps > 0) setLastTps(lastChunkTps);
       backendNodeId = streamResult.nodeId;
       backendParentId = streamResult.parentId;
 
@@ -83,7 +115,6 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
         prompt,
         fullText,
         selectedModel as ModelId,
-        isSensitive,
         backendNodeId ?? undefined,
         backendParentId,
       );
@@ -92,15 +123,17 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') return;
       console.error('Chat failed:', err);
-      setError('Something went wrong. Check the console.');
+      setError(`Failed to get a response. The model may not be available. Your prompt: "${prompt}"`);
+      setFailedPrompt(prompt);
       setPendingPrompt(null);
     } finally {
+      isStreamingRef.current = false;
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-tenet-bg">
+    <div className={`flex-1 flex flex-col min-h-0 ${isDark ? 'bg-[#1a1a1e]' : 'bg-[#f0f0f2]'}`}>
       <div className="flex-1 overflow-y-auto min-h-0 px-6 py-6 space-y-2">
         {thread.length === 0 && !isLoading ? (
           <div className="flex items-center justify-center h-full">
@@ -133,20 +166,20 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
 
             {/* Streaming response bubble */}
             <div className="flex items-start gap-3">
-              <div className="w-7 h-7 rounded-full bg-tenet-teal/20 border border-tenet-teal/30 flex items-center justify-center flex-shrink-0 mt-1">
-                <span className="text-tenet-teal text-xs font-bold">T</span>
+              <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-1 ${isDark ? 'bg-[#2DD4BF]/20 border border-[#2DD4BF]/30' : 'bg-[#0d9488]/20 border border-[#0d9488]/30'}`}>
+                <span className={`text-xs font-bold ${isDark ? 'text-[#2DD4BF]' : 'text-[#0d9488]'}`}>T</span>
               </div>
-              <div className="bg-tenet-surface border-l-2 border-tenet-teal rounded-2xl px-4 py-3 max-w-2xl flex-1">
+              <div className={`rounded-2xl rounded-tl-sm px-4 py-3 flex-1 min-w-0 border-l-2 ${isDark ? 'bg-[#111114] border-[#2DD4BF]' : 'bg-white border-[#0d9488] shadow-sm'}`}>
                 {streamingText ? (
-                  <div className="text-sm text-gray-200 leading-relaxed prose prose-invert prose-sm max-w-none">
+                  <div className={`text-sm leading-relaxed prose prose-sm max-w-none ${isDark ? 'text-gray-200 prose-invert' : 'text-gray-800'}`}>
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
-                    <span className="inline-block w-1.5 h-4 bg-tenet-teal ml-0.5 animate-pulse align-middle" />
+                    <span className={`inline-block w-1.5 h-4 ml-0.5 animate-pulse align-middle ${isDark ? 'bg-[#2DD4BF]' : 'bg-[#0d9488]'}`} />
                   </div>
                 ) : (
                   <span className="inline-flex gap-1 items-center">
-                    <span className="w-1.5 h-1.5 rounded-full bg-tenet-teal animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <span className="w-1.5 h-1.5 rounded-full bg-tenet-teal animate-bounce" style={{ animationDelay: '150ms' }} />
-                    <span className="w-1.5 h-1.5 rounded-full bg-tenet-teal animate-bounce" style={{ animationDelay: '300ms' }} />
+                    <span className={`w-1.5 h-1.5 rounded-full animate-bounce ${isDark ? 'bg-[#2DD4BF]' : 'bg-[#0d9488]'}`} style={{ animationDelay: '0ms' }} />
+                    <span className={`w-1.5 h-1.5 rounded-full animate-bounce ${isDark ? 'bg-[#2DD4BF]' : 'bg-[#0d9488]'}`} style={{ animationDelay: '150ms' }} />
+                    <span className={`w-1.5 h-1.5 rounded-full animate-bounce ${isDark ? 'bg-[#2DD4BF]' : 'bg-[#0d9488]'}`} style={{ animationDelay: '300ms' }} />
                   </span>
                 )}
               </div>
@@ -155,8 +188,26 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
         )}
 
         {error && (
-          <div className="mx-auto max-w-lg bg-red-900/30 border border-red-700/50 rounded-lg px-4 py-2 text-sm text-red-300">
-            {error}
+          <div className="mx-auto max-w-lg bg-red-900/30 border border-red-700/50 rounded-lg px-4 py-3 text-sm text-red-300">
+            <p className="mb-1">Model unavailable or request failed.</p>
+            {failedPrompt && (
+              <div className={`mt-2 rounded px-3 py-2 text-xs font-mono ${isDark ? 'bg-black/30 text-gray-300' : 'bg-red-50 text-gray-700'}`}>
+                {failedPrompt}
+              </div>
+            )}
+            <div className="flex gap-2 mt-2">
+              {failedPrompt && (
+                <button
+                  onClick={() => { navigator.clipboard.writeText(failedPrompt); }}
+                  className="text-xs text-red-400 hover:text-red-200 underline"
+                >
+                  Copy prompt
+                </button>
+              )}
+              <button onClick={() => { setError(null); setFailedPrompt(null); }} className="text-xs text-red-400 hover:text-red-200 underline ml-auto">
+                Dismiss
+              </button>
+            </div>
           </div>
         )}
 

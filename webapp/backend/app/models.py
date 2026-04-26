@@ -4,10 +4,9 @@ import uuid
 
 class ChatRequest(BaseModel):
     prompt: str
-    parent_id: Optional[str] = None  # Frontend sends the "current" node
+    parent_id: Optional[str] = None
     root_id: str
     model: str
-    is_sensitive: bool = False
     auto_branching: bool = False
 
 class Node(BaseModel):
@@ -35,3 +34,19 @@ class NodeSummaryRequest(BaseModel):
     root_id: str
     node_ids: Optional[List[str]] = None
     model: str = "gemma4"
+
+
+class UpdateNodeRequest(BaseModel):
+    prompt: Optional[str] = None
+    response: Optional[str] = None
+    branch_label: Optional[str] = None
+    pruned: Optional[bool] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class UpdateConversationRequest(BaseModel):
+    title: Optional[str] = None
+
+
+class BulkDeleteRequest(BaseModel):
+    node_ids: List[str]

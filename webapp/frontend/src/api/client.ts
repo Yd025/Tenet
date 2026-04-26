@@ -163,26 +163,9 @@ export async function fetchMergeRoots(params: {
 // Legacy / compatibility shims
 // ---------------------------------------------------------------------------
 
-// fetchChat — non-streaming fallback used by ChatView until streaming is wired
-export async function fetchChat(params: {
-  prompt: string;
-  conversation_id: string;
-  branch_id: string;
-  model: ModelId;
-  is_sensitive: boolean;
-}): Promise<{ response: string; node_id: string; model_used: ModelId; tps: number }> {
-  const response = await fetch(`${API_BASE}/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-  return handleResponse(response);
-}
-
-// POST /api/merge/nodes (two-node merge — used by BranchHistoryView)
+// POST /api/merge/nodes (multi-node merge — used by BranchHistoryView)
 export async function fetchMerge(params: {
-  node_id_a: string;
-  node_id_b: string;
+  node_ids: string[];
   root_id?: string;
   model?: string;
   conflict_resolutions?: MergeResolution[];
@@ -191,7 +174,7 @@ export async function fetchMerge(params: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      node_ids: [params.node_id_a, params.node_id_b],
+      node_ids: params.node_ids,
       root_id: params.root_id ?? 'default',
       model: params.model ?? 'gemma4',
       conflict_resolutions: params.conflict_resolutions ?? null,
@@ -228,6 +211,80 @@ export async function fetchConversations(): Promise<{ root_id: string; title: st
   const response = await fetch(`${API_BASE}/conversations`);
   if (!response.ok) return [];
   return response.json();
+}
+
+// GET /api/conversations/:root_id
+export async function fetchConversation(rootId: string): Promise<{ root_id: string; title: string; created_at: string }> {
+  const response = await fetch(`${API_BASE}/conversations/${encodeURIComponent(rootId)}`);
+  return handleResponse(response);
+}
+
+// PUT /api/conversations/:root_id
+export async function updateConversation(rootId: string, title: string): Promise<{ root_id: string; title: string }> {
+  const response = await fetch(`${API_BASE}/conversations/${encodeURIComponent(rootId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  return handleResponse(response);
+}
+
+// DELETE /api/conversations/:root_id
+export async function deleteConversation(rootId: string): Promise<{ deleted_nodes: number; deleted_conversation: number }> {
+  const response = await fetch(`${API_BASE}/conversations/${encodeURIComponent(rootId)}`, {
+    method: 'DELETE',
+  });
+  return handleResponse(response);
+}
+
+// PUT /api/nodes/:node_id
+export async function updateNode(nodeId: string, fields: {
+  prompt?: string;
+  response?: string;
+  branch_label?: string;
+  pruned?: boolean;
+  metadata?: Record<string, unknown>;
+}): Promise<import('../types').ConversationNode> {
+  const response = await fetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+  return handleResponse(response);
+}
+
+// DELETE /api/nodes/:node_id  (soft by default, hard=true for permanent)
+export async function deleteNode(nodeId: string, hard = false): Promise<{ pruned?: boolean; deleted?: boolean; node_id: string }> {
+  const response = await fetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}?hard=${hard}`, {
+    method: 'DELETE',
+  });
+  return handleResponse(response);
+}
+
+// DELETE /api/nodes  (bulk)
+export async function bulkDeleteNodes(nodeIds: string[], hard = false): Promise<{ pruned?: number; deleted?: number }> {
+  const response = await fetch(`${API_BASE}/nodes?hard=${hard}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ node_ids: nodeIds }),
+  });
+  return handleResponse(response);
+}
+
+// PATCH /api/nodes/:node_id/restore
+export async function restoreNode(nodeId: string): Promise<import('../types').ConversationNode> {
+  const response = await fetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/restore`, {
+    method: 'PATCH',
+  });
+  return handleResponse(response);
+}
+
+// PATCH /api/nodes/:node_id/reparent
+export async function reparentNode(nodeId: string, newParentId: string): Promise<import('../types').ConversationNode> {
+  const response = await fetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}/reparent?new_parent_id=${encodeURIComponent(newParentId)}`, {
+    method: 'PATCH',
+  });
+  return handleResponse(response);
 }
 
 // POST /api/nodes/summaries
