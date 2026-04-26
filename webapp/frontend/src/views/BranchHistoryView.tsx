@@ -91,6 +91,17 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
   const [pendingMergePair, setPendingMergePair] = useState<{ a: string; b: string } | null>(null);
   const [mergeConflicts, setMergeConflicts] = useState<MergeConflict[]>([]);
   const [conflictResolutions, setConflictResolutions] = useState<Record<string, MergeResolution>>({});
+  const [bookmarkedNodeIds, setBookmarkedNodeIds] = useState<Set<string>>(new Set());
+  const [bookmarksExpanded, setBookmarksExpanded] = useState(true);
+
+  const toggleBookmark = useCallback((nodeId: string) => {
+    setBookmarkedNodeIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (!ctxMenu) return;
@@ -112,8 +123,12 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
       },
       onPrune: pruneNode,
       onSelect: selectNodeForMerge,
+      onDoubleClick: (id: string) => {
+        checkoutNode(id);
+        setActiveTab('chats');
+      },
     }),
-    [checkoutNode, branchFromNode, pruneNode, selectNodeForMerge, clearMergeSelection],
+    [checkoutNode, branchFromNode, pruneNode, selectNodeForMerge, clearMergeSelection, setActiveTab],
   );
 
   const { layoutNodes, mergeEdges } = useMemo(() => {
@@ -300,6 +315,25 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
     setActiveTab('chats');
   }
 
+  const panToNode = useCallback((nodeId: string) => {
+    const svg = svgRef.current;
+    const zoomBehavior = zoomBehaviorRef.current;
+    if (!svg || !zoomBehavior) return;
+
+    const target = layoutNodes.find((n) => n.data.id === nodeId);
+    if (!target) return;
+
+    const svgRect = svg.getBoundingClientRect();
+    const svgW = svgRect.width || 800;
+    const svgH = svgRect.height || 600;
+    const scale = 1.5;
+
+    select(svg).call(
+      zoomBehavior.transform,
+      zoomIdentity.translate(svgW / 2 - target.x * scale, svgH / 2 - target.y * scale).scale(scale),
+    );
+  }, [layoutNodes]);
+
   const nodeCount = Object.values(storeNodes).filter((n) => !n.pruned).length;
 
   return (
@@ -362,6 +396,7 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
               isBranch: d.branch_label !== null,
               isMerge: d.is_merge_node,
               isSelected: selectedNodeIds.includes(d.node_id),
+              isBookmarked: bookmarkedNodeIds.has(d.node_id),
               nodeId: d.node_id,
               ...handlers,
             };
@@ -390,6 +425,12 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
             onClick={() => { handlers.onBranch(ctxMenu.nodeId); setCtxMenu(null); setActiveTab('chats'); }}
           >
             &#x238B; Branch from Here
+          </button>
+          <button
+            className="block w-full text-left px-4 py-2 text-sm text-amber-400 hover:bg-white/10 transition-colors"
+            onClick={() => { toggleBookmark(ctxMenu.nodeId); setCtxMenu(null); }}
+          >
+            {bookmarkedNodeIds.has(ctxMenu.nodeId) ? '★ Remove Bookmark' : '☆ Bookmark'}
           </button>
           <button
             className="block w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-white/10 transition-colors"
@@ -552,11 +593,30 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
           )}
 
           {selectedNodeIds.length === 1 && (
+            <>
+              <button
+                onClick={handleBranchFromSelected}
+                className="px-4 py-1.5 rounded bg-tenet-purple text-white font-semibold text-sm hover:opacity-90 transition-opacity"
+              >
+                &#x238B; Branch from Here
+              </button>
+              <button
+                onClick={() => toggleBookmark(selectedNodeIds[0])}
+                className="px-4 py-1.5 rounded border border-amber-500/50 text-amber-400 font-semibold text-sm hover:bg-amber-500/10 transition-colors"
+              >
+                {bookmarkedNodeIds.has(selectedNodeIds[0]) ? '★ Unbookmark' : '☆ Bookmark'}
+              </button>
+            </>
+          )}
+
+          {selectedNodeIds.length === 2 && selectedNodeIds.some((id) => !bookmarkedNodeIds.has(id)) && (
             <button
-              onClick={handleBranchFromSelected}
-              className="px-4 py-1.5 rounded bg-tenet-purple text-white font-semibold text-sm hover:opacity-90 transition-opacity"
+              onClick={() => selectedNodeIds.forEach((id) => {
+                if (!bookmarkedNodeIds.has(id)) toggleBookmark(id);
+              })}
+              className="px-3 py-1.5 rounded border border-amber-500/50 text-amber-400 text-sm hover:bg-amber-500/10 transition-colors"
             >
-              &#x238B; Branch from Here
+              ☆ Bookmark Both
             </button>
           )}
 
@@ -568,6 +628,59 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
           </button>
         </div>
       )}
+
+      {/* Bookmarks card */}
+      <div
+        className="absolute bottom-4 right-4 z-20 w-64 bg-tenet-surface border border-tenet-border rounded-lg shadow-xl overflow-hidden"
+        style={{ boxShadow: '0 4px 24px rgba(0,0,0,0.7)' }}
+      >
+        <button
+          className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-white hover:bg-white/5 transition-colors"
+          onClick={() => setBookmarksExpanded((v) => !v)}
+        >
+          <span>★ Bookmarks ({bookmarkedNodeIds.size})</span>
+          <span className="text-gray-500">{bookmarksExpanded ? '▾' : '▸'}</span>
+        </button>
+
+        {bookmarksExpanded && (
+          <div className="max-h-52 overflow-y-auto border-t border-tenet-border">
+            {bookmarkedNodeIds.size === 0 ? (
+              <p className="text-[10px] text-gray-600 px-3 py-2">
+                No bookmarks yet. Select a node and click Bookmark, or right-click a node.
+              </p>
+            ) : (
+              [...bookmarkedNodeIds].map((nodeId) => {
+                const label = labelMap[nodeId] ?? nodeId.slice(0, 8);
+                const sublabel = sublabelMap[nodeId] ?? '';
+                return (
+                  <div
+                    key={nodeId}
+                    className="flex items-center gap-2 px-3 py-1.5 hover:bg-white/5 transition-colors group"
+                  >
+                    <button
+                      className="flex-1 text-left min-w-0"
+                      onClick={() => {
+                        panToNode(nodeId);
+                        checkoutNode(nodeId);
+                      }}
+                    >
+                      <div className="text-xs text-white font-medium truncate">{label}</div>
+                      <div className="text-[10px] text-gray-500 truncate">{sublabel}</div>
+                    </button>
+                    <button
+                      className="text-gray-600 hover:text-amber-400 text-xs opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                      onClick={() => toggleBookmark(nodeId)}
+                      title="Remove bookmark"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
