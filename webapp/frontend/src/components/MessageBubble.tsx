@@ -1,25 +1,34 @@
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { ConversationNode } from '../types';
 
 interface MessageBubbleProps {
   node: ConversationNode;
   isHead: boolean;
+  // When true, only render the user prompt (used for the optimistic bubble while streaming)
+  promptOnly?: boolean;
 }
 
-export default function MessageBubble({ node, isHead }: MessageBubbleProps) {
-  const modelLabels: Record<string, string> = {
-    system: 'System',
-    gemma4: 'Gemma 4 • local',
-    deepseek: 'DeepSeek R1 • local',
-    qwen: 'Qwen 2.5 • local',
-  };
-  const modelLabel = modelLabels[node.model_used] ?? `${node.model_used} • local`;
+const modelLabels: Record<string, string> = {
+  system: 'System',
+  gemma4: 'Gemma 4 • local',
+  'gemma4:latest': 'Gemma 4 • local',
+  deepseek: 'DeepSeek R1 • local',
+  'deepseek-r1:latest': 'DeepSeek R1 • local',
+  qwen: 'Qwen 2.5 • local',
+  'qwen2.5:latest': 'Qwen 2.5 • local',
+  'qwen2.5-7b': 'Qwen 2.5 7B • local',
+};
 
-  // Skip nodes that are empty branch stubs (no prompt yet)
+export default function MessageBubble({ node, isHead, promptOnly = false }: MessageBubbleProps) {
+  const raw = node.model_used ?? '';
+  const modelLabel = modelLabels[raw] ?? (raw ? `${raw} • local` : 'local');
+
   if (!node.prompt && !node.response) return null;
 
   return (
     <div className="mb-6 flex flex-col gap-3">
-      {/* User prompt — right-aligned */}
+      {/* User prompt bubble */}
       {node.prompt && (
         <div className="flex justify-end">
           <div className="bg-gray-800 text-white rounded-2xl rounded-tr-sm px-4 py-3 max-w-[72%] text-sm leading-relaxed">
@@ -28,10 +37,9 @@ export default function MessageBubble({ node, isHead }: MessageBubbleProps) {
         </div>
       )}
 
-      {/* AI response — left-aligned with avatar */}
-      {node.response && (
+      {/* AI response — only shown when not in promptOnly mode */}
+      {!promptOnly && node.response && (
         <div className="flex items-start gap-3">
-          {/* Bot avatar */}
           <div className="w-7 h-7 rounded-full bg-tenet-teal/20 border border-tenet-teal/30 flex items-center justify-center flex-shrink-0 mt-1">
             <span className="text-tenet-teal text-xs font-bold">T</span>
           </div>
@@ -43,11 +51,13 @@ export default function MessageBubble({ node, isHead }: MessageBubbleProps) {
               </span>
             )}
             <div
-              className={`bg-tenet-surface text-gray-200 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[90%] text-sm leading-relaxed whitespace-pre-wrap ${
+              className={`bg-tenet-surface text-gray-200 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[90%] text-sm leading-relaxed prose prose-invert prose-sm max-w-none ${
                 isHead ? 'ring-1 ring-tenet-teal/30' : ''
               }`}
             >
-              {node.response}
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {node.response}
+              </ReactMarkdown>
             </div>
             <span className="text-xs text-gray-600 mt-1 ml-1">{modelLabel}</span>
           </div>

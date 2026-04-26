@@ -11,18 +11,19 @@ class ChatRequest(BaseModel):
 
 class Node(BaseModel):
     node_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    parent_ids: List[str] = []  # Supports multiple parents for merges
+    parent_ids: List[str] = []
     root_id: str
     prompt: str
     response: str
+    model_used: str = "unknown"
     metadata: Dict[str, Any] = {}
 
 class MergeRequest(BaseModel):
-    node_ids: List[str]  # Merge 2 or more nodes
+    node_ids: List[str]
     root_id: str
-    model: str = "qwen3.6:latest"
+    model: str = "gemma4"
 
 class RootMergeRequest(BaseModel):
-    root_ids: List[str]  # Merge two entire project trees
+    root_ids: List[str]
     new_root_name: str
-    model: str = "qwen3.6:latest"
+    model: str = "gemma4"

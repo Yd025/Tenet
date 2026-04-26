@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { useConversationStore } from '../store/useConversationStore';
+import { fetchNodes } from '../api/client';
 import Sidebar from './Sidebar';
 import TopNav from './TopNav';
 import ChatView from '../views/ChatView';
@@ -9,16 +10,20 @@ import BranchHistoryView from '../views/BranchHistoryView';
 export default function AppShell() {
   const { conversationId } = useParams<{ conversationId: string }>();
   const setActiveConversation = useConversationStore((s) => s.setActiveConversation);
+  const loadNodes = useConversationStore((s) => s.loadNodes);
 
   const [activeTab, setActiveTab] = useState<'chats' | 'branch-history'>('chats');
   const [selectedModel, setSelectedModel] = useState('gemma4');
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   useEffect(() => {
-    if (conversationId) {
-      setActiveConversation(conversationId);
-    }
-  }, [conversationId, setActiveConversation]);
+    if (!conversationId) return;
+    setActiveConversation(conversationId);
+    // Load existing nodes for this conversation from the backend
+    fetchNodes(conversationId).then((nodes) => {
+      if (nodes.length > 0) loadNodes(nodes);
+    });
+  }, [conversationId, setActiveConversation, loadNodes]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-tenet-bg">
@@ -43,7 +48,7 @@ export default function AppShell() {
         {activeTab === 'chats' ? (
           <ChatView selectedModel={selectedModel} />
         ) : (
-          <BranchHistoryView setActiveTab={setActiveTab} />
+          <BranchHistoryView setActiveTab={setActiveTab} selectedModel={selectedModel} />
         )}
       </div>
     </div>

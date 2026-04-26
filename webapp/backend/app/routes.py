@@ -1,8 +1,8 @@
 import os, time, json, uuid, logging, random
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from .models import Node, ChatRequest, MergeRequest, RootMergeRequest
-from .database import nodes_collection
+from .database import nodes_collection, conversations_collection
 import httpx
 import pynvml
 
@@ -32,16 +32,33 @@ except:
 
 # --- HELPER: CONTEXT RECONSTRUCTION ---
 async def get_history(last_node_id: str):
-    history = []
+    """Walk the parent chain and return messages in chronological order."""
+    chain = []
     curr = last_node_id
     while curr:
         node = await nodes_collection.find_one({"node_id": curr})
-        if not node: break
-        history.insert(0, {"role": "user", "content": node['prompt']})
-        history.insert(0, {"role": "assistant", "content": node['response']})
-        # For simplicity in history, we follow the first parent
-        curr = node.get("parent_ids")[0] if node.get("parent_ids") else None
+        if not node:
+            break
+        chain.append(node)
+        parent_ids = node.get("parent_ids") or []
+        curr = parent_ids[0] if parent_ids else None
+
+    # chain is leaf→root, reverse to get root→leaf (chronological)
+    chain.reverse()
+
+    history = []
+    for node in chain:
+        if node.get("prompt") and node["prompt"] != "SYSTEM_MERGE_ACTION":
+            history.append({"role": "user", "content": node["prompt"]})
+        if node.get("response"):
+            history.append({"role": "assistant", "content": node["response"]})
+
     return history
+
+# --- HELPER: strip MongoDB _id before returning ---
+def serialize_node(doc: dict) -> dict:
+    doc.pop("_id", None)
+    return doc
 
 # --- 1. REAL TELEMETRY ---
 @router.get("/telemetry")
@@ -88,7 +105,52 @@ async def get_telemetry():
 
     return stats
 
-# --- 2. STREAMING CHAT (Branching) ---
+# --- 2. GET NODES BY ROOT ---
+@router.get("/nodes")
+async def get_nodes(root_id: str = Query(..., description="The root/conversation ID")):
+    docs = await nodes_collection.find({"root_id": root_id}).to_list(1000)
+    return [serialize_node(d) for d in docs]
+
+# --- 3. GET SINGLE NODE ---
+@router.get("/nodes/{node_id}")
+async def get_node(node_id: str):
+    doc = await nodes_collection.find_one({"node_id": node_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return serialize_node(doc)
+
+# --- 4. LIST ROOTS ---
+@router.get("/roots")
+async def list_roots():
+    root_ids = await nodes_collection.distinct("root_id")
+    return {"roots": root_ids}
+
+# --- 5. LIST CONVERSATIONS (with titles) ---
+@router.get("/conversations")
+async def list_conversations():
+    docs = await conversations_collection.find({}).to_list(1000)
+    return [serialize_node(d) for d in docs]
+
+# --- HELPER: generate a short title from the first prompt ---
+async def generate_title(prompt: str, model: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": f"Summarize this in 5 words or fewer as a conversation title. No punctuation, no quotes:\n\n{prompt}",
+                    "stream": False,
+                },
+            )
+            resp.raise_for_status()
+            title = resp.json().get("response", "").strip().strip('"').strip("'")
+            # Truncate to 60 chars just in case
+            return title[:60] if title else prompt[:40]
+    except Exception:
+        return prompt[:40]
+
+# --- 5. STREAMING CHAT (Branching) ---
 @router.post("/chat/stream")
 async def stream_chat(req: ChatRequest):
     async def event_generator():
@@ -118,16 +180,32 @@ async def stream_chat(req: ChatRequest):
             root_id=req.root_id,
             prompt=req.prompt,
             response=full_response,
+            model_used=req.model,
             metadata={"model": req.model, "tps": 61.7}
         )
         
         # Use model_dump() for Pydantic v2 compatibility
         await nodes_collection.insert_one(new_node.model_dump())
+
+        # If this is the first node in the conversation, generate and save a title
+        if not p_ids:
+            title = await generate_title(req.prompt, req.model)
+            await conversations_collection.update_one(
+                {"root_id": req.root_id},
+                {"$setOnInsert": {
+                    "root_id": req.root_id,
+                    "title": title,
+                    "created_at": new_node.model_dump().get("metadata", {}).get("timestamp", ""),
+                }},
+                upsert=True,
+            )
+
+        yield f"data: {json.dumps({'type': 'node_saved', 'node_id': new_node.node_id})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-# --- 3. NODE MERGE (Intra-Root) ---
+# --- 6. NODE MERGE (Intra-Root) ---
 @router.post("/merge/nodes")
 async def merge_nodes(req: MergeRequest):
     nodes = await nodes_collection.find({"node_id": {"$in": req.node_ids}}).to_list(10)
@@ -155,7 +233,7 @@ async def merge_nodes(req: MergeRequest):
     await nodes_collection.insert_one(new_node.model_dump())
     return new_node.model_dump() # Return the dict, not the object
 
-# --- 4. ROOT MERGE (Cross-Project) ---
+# --- 7. ROOT MERGE (Cross-Project) ---
 @router.post("/merge/roots")
 async def merge_roots(req: RootMergeRequest):
     # Create a new "Master" root by pulling the latest leaf of each requested root

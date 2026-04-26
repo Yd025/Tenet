@@ -9,12 +9,14 @@ interface ConversationStore {
   selectedNodeIds: string[];
 
   // actions
+  loadNodes: (nodes: ConversationNode[]) => void;
   startConversation: (title: string) => void;
   commitMessage: (
     prompt: string,
     response: string,
     model: ModelId,
     isSensitive: boolean,
+    backendNodeId?: string,
   ) => void;
   checkoutNode: (nodeId: string) => void;
   branchFromNode: (nodeId: string, label: string) => string;
@@ -23,6 +25,7 @@ interface ConversationStore {
     nodeIdA: string,
     nodeIdB: string,
     synthesisResponse: string,
+    mergeNodeId?: string,
   ) => void;
   selectNodeForMerge: (nodeId: string) => void;
   clearMergeSelection: () => void;
@@ -30,110 +33,6 @@ interface ConversationStore {
   getThreadToHead: () => ConversationNode[];
 }
 
-// ---------------------------------------------------------------------------
-// Seed data — hardcoded UUIDs for stability
-// ---------------------------------------------------------------------------
-const SEED_CONV_ID = 'a1b2c3d4-0000-4000-8000-000000000001';
-const SEED_V1_ID = 'a1b2c3d4-0000-4000-8000-000000000010';
-const SEED_V2_ID = 'a1b2c3d4-0000-4000-8000-000000000020';
-const SEED_V3_ID = 'a1b2c3d4-0000-4000-8000-000000000030';
-const SEED_B1_ID = 'a1b2c3d4-0000-4000-8000-000000000040';
-
-const seedNodes: Record<string, ConversationNode> = {
-  [SEED_V1_ID]: {
-    node_id: SEED_V1_ID,
-    conversation_id: SEED_CONV_ID,
-    root_id: SEED_CONV_ID,
-    parent_id: null,
-    merge_parent_id: null,
-    parent_ids: [],
-    children_ids: [SEED_V2_ID],
-    prompt:
-      "I have a phone screening for a senior software engineer role at a mid-size fintech startup tomorrow. The job description emphasizes distributed systems, Python, and API design. Can you help me set the context so we can prep effectively?",
-    response:
-      "Absolutely — let's set you up for success. For a senior SWE phone screen at a fintech startup with that stack, interviewers typically probe three areas in the first 30–45 minutes:\n\n1. **Role fit** — your experience with distributed systems (queues, consensus, eventual consistency) and how you reason about trade-offs.\n2. **Python depth** — not just syntax; they'll test async patterns, GIL awareness, packaging, and testing discipline.\n3. **API design instincts** — REST vs. gRPC, versioning strategies, auth models, and how you'd document a contract.\n\nI'll track this context across our conversation. What would you like to drill first — technical depth, behavioral questions, or system design?",
-    model_used: 'deepseek',
-    execution_context: 'local',
-    is_sensitive: false,
-    branch_label: null,
-    is_merge_node: false,
-    pruned: false,
-    timestamp: '2026-04-20T09:00:00.000Z',
-  },
-  [SEED_V2_ID]: {
-    node_id: SEED_V2_ID,
-    conversation_id: SEED_CONV_ID,
-    root_id: SEED_CONV_ID,
-    parent_id: SEED_V1_ID,
-    merge_parent_id: null,
-    parent_ids: [SEED_V1_ID],
-    children_ids: [SEED_V3_ID, SEED_B1_ID],
-    prompt:
-      "Let's focus on the technical side first. What Python and distributed systems questions should I expect, and how should I frame my answers?",
-    response:
-      "Great call — technical questions usually come in two flavors here:\n\n**Python:**\n- *\"Walk me through the GIL and when it matters.\"* Frame around CPU-bound vs. I/O-bound work; mention `multiprocessing` vs. `asyncio`.\n- *\"How do you structure a large Python service?\"* Hit: layered architecture, dependency injection, type annotations, and `pytest` fixtures.\n- *\"What's your approach to async Python?\"* Discuss `async/await`, event loops, and avoiding blocking calls in coroutines.\n\n**Distributed Systems:**\n- *\"Explain eventual consistency and where you've applied it.\"* Use a concrete example (e.g., order ledger with async settlement).\n- *\"How would you design a rate limiter?\"* Token bucket vs. sliding window — mention Redis + Lua for atomic ops.\n- *\"What happens during a network partition in your system?\"* CAP theorem, circuit breakers, retry with exponential back-off.\n\n**Framing tip:** Lead with the trade-off, then your decision, then the outcome. Interviewers want to see how you think, not just what you know.",
-    model_used: 'deepseek',
-    execution_context: 'local',
-    is_sensitive: false,
-    branch_label: null,
-    is_merge_node: false,
-    pruned: false,
-    timestamp: '2026-04-20T09:05:00.000Z',
-  },
-  [SEED_V3_ID]: {
-    node_id: SEED_V3_ID,
-    conversation_id: SEED_CONV_ID,
-    root_id: SEED_CONV_ID,
-    parent_id: SEED_V2_ID,
-    merge_parent_id: null,
-    parent_ids: [SEED_V2_ID],
-    children_ids: [],
-    prompt:
-      "Now give me 3 system design questions they're likely to ask and concise talking points for each.",
-    response:
-      "Here are the top 3 for a fintech senior SWE screen:\n\n**1. Design a payment processing pipeline**\n- Idempotency keys on every write; exactly-once semantics via deduplication table.\n- Async queue (Kafka/SQS) between ingestion and settlement; dead-letter queue for failures.\n- Ledger as append-only event log; balances computed as materialized view.\n\n**2. Design a real-time fraud detection system**\n- Stream processing (Flink/Spark Structured Streaming) for low-latency feature computation.\n- Feature store (Redis) for sub-millisecond lookups during scoring.\n- Async feedback loop to retrain models without blocking transaction flow.\n\n**3. Design a rate-limited public API**\n- Token bucket per API key stored in Redis; Lua script for atomic check-and-decrement.\n- Tiered limits (free/pro/enterprise) backed by config service — no deploys for limit changes.\n- Return `Retry-After` headers; expose usage metrics via `/me/usage` endpoint.\n\n**For each:** state assumptions first, call out the biggest risk (consistency, latency, cost), and mention one thing you'd iterate on post-MVP.",
-    model_used: 'deepseek',
-    execution_context: 'local',
-    is_sensitive: false,
-    branch_label: null,
-    is_merge_node: false,
-    pruned: false,
-    timestamp: '2026-04-20T09:12:00.000Z',
-  },
-  [SEED_B1_ID]: {
-    node_id: SEED_B1_ID,
-    conversation_id: SEED_CONV_ID,
-    root_id: SEED_CONV_ID,
-    parent_id: SEED_V2_ID,
-    merge_parent_id: null,
-    parent_ids: [SEED_V2_ID],
-    children_ids: [],
-    prompt:
-      "Actually, let me take a different angle — what behavioral questions should I prep for instead?",
-    response:
-      "Smart to cover both tracks. For a senior role at a fintech startup, expect STAR-format behavioral questions like:\n\n**1. \"Tell me about a time you disagreed with a technical decision.\"**\n- Show you can advocate with data, accept decisions gracefully, and revisit when new evidence emerges.\n\n**2. \"Describe a production incident you owned.\"**\n- Hit: detection, communication cadence, root cause, blameless post-mortem, and the follow-up action item you shipped.\n\n**3. \"How do you mentor junior engineers?\"**\n- Concrete example: code reviews as teaching moments, pairing sessions, setting up feedback loops without micromanaging.\n\n**4. \"Tell me about a time you had to ship under pressure.\"**\n- Emphasize how you scoped ruthlessly, communicated trade-offs to stakeholders, and documented the tech debt you deferred.\n\n**Fintech-specific angle:** Weave in compliance awareness — e.g., how you balanced velocity with audit trail requirements or PCI-DSS constraints. It signals maturity for the domain.",
-    model_used: 'deepseek',
-    execution_context: 'local',
-    is_sensitive: false,
-    branch_label: 'Behavioral Focus',
-    is_merge_node: false,
-    pruned: false,
-    timestamp: '2026-04-20T09:08:00.000Z',
-  },
-};
-
-const seedConversations: Conversation[] = [
-  {
-    id: SEED_CONV_ID,
-    title: 'Phone Screening Prep',
-    root_node_id: SEED_V1_ID,
-    created_at: '2026-04-20T09:00:00.000Z',
-  },
-];
-
-// ---------------------------------------------------------------------------
-// Helper: collect all descendant node ids (inclusive of root)
-// ---------------------------------------------------------------------------
 function collectDescendants(
   nodeId: string,
   nodes: Record<string, ConversationNode>,
@@ -147,15 +46,53 @@ function collectDescendants(
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// Store
-// ---------------------------------------------------------------------------
 export const useConversationStore = create<ConversationStore>((set, get) => ({
-  nodes: { ...seedNodes },
-  conversations: [...seedConversations],
-  activeConversationId: SEED_CONV_ID,
-  headNodeId: SEED_V3_ID,
+  nodes: {},
+  conversations: [],
+  activeConversationId: null,
+  headNodeId: null,
   selectedNodeIds: [],
+
+  // Load nodes fetched from the backend into the store.
+  // Reconstructs children_ids from parent_ids since the backend doesn't store them.
+  loadNodes: (incoming: ConversationNode[]) => {
+    const nodes: Record<string, ConversationNode> = {};
+
+    for (const n of incoming) {
+      nodes[n.node_id] = {
+        ...n,
+        conversation_id: n.conversation_id ?? n.root_id,
+        parent_id: n.parent_ids?.[0] ?? null,
+        merge_parent_id: n.parent_ids?.[1] ?? null,
+        children_ids: [],
+        branch_label: n.branch_label ?? null,
+        is_merge_node: (n.parent_ids?.length ?? 0) > 1,
+        pruned: n.pruned ?? false,
+        execution_context: 'local',
+        is_sensitive: n.is_sensitive ?? false,
+        model_used: (n.model_used as ModelId) ?? ((n as any).metadata?.model as ModelId) ?? 'gemma4',
+      };
+    }
+
+    for (const n of Object.values(nodes)) {
+      for (const pid of n.parent_ids ?? []) {
+        if (nodes[pid]) {
+          nodes[pid].children_ids = [...new Set([...nodes[pid].children_ids, n.node_id])];
+        }
+      }
+    }
+
+    const leaves = Object.values(nodes).filter((n) => n.children_ids.length === 0 && !n.pruned);
+    const head = leaves.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+
+    set((state) => ({
+      nodes,
+      // Only reset headNodeId if it hasn't been explicitly set since the last
+      // setActiveConversation call (i.e. it's still null from the clear).
+      // This preserves a headNodeId set by branchFromNode before loadNodes resolves.
+      headNodeId: state.headNodeId === null ? (head?.node_id ?? null) : state.headNodeId,
+    }));
+  },
 
   startConversation: (title: string) => {
     const id = crypto.randomUUID();
@@ -169,6 +106,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       conversations: [...state.conversations, newConv],
       activeConversationId: id,
       headNodeId: null,
+      nodes: {},
     }));
   },
 
@@ -177,13 +115,21 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     response: string,
     model: ModelId,
     isSensitive: boolean,
+    backendNodeId?: string,
   ) => {
-    const nodeId = crypto.randomUUID();
+    // Use the backend's node_id so the local store stays in sync with MongoDB
+    const nodeId = backendNodeId ?? crypto.randomUUID();
     const timestamp = new Date().toISOString();
 
     set((state) => {
       const { activeConversationId, headNodeId } = state;
       if (!activeConversationId) return {};
+
+      // If the parent already has children, this commit is a branch
+      const parentHasChildren =
+        headNodeId != null &&
+        state.nodes[headNodeId] != null &&
+        state.nodes[headNodeId].children_ids.length > 0;
 
       const newNode: ConversationNode = {
         node_id: nodeId,
@@ -198,7 +144,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
         model_used: model,
         execution_context: 'local',
         is_sensitive: isSensitive,
-        branch_label: null,
+        branch_label: parentHasChildren ? 'Branch' : null,
         is_merge_node: false,
         pruned: false,
         timestamp,
@@ -206,7 +152,6 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
 
       const updatedNodes = { ...state.nodes, [nodeId]: newNode };
 
-      // If there was a previous head, register this new node as its child
       if (headNodeId && updatedNodes[headNodeId]) {
         updatedNodes[headNodeId] = {
           ...updatedNodes[headNodeId],
@@ -214,7 +159,6 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
         };
       }
 
-      // Update root_node_id on the conversation if this is the first node
       const updatedConversations = state.conversations.map((conv) => {
         if (conv.id === activeConversationId && !conv.root_node_id) {
           return { ...conv, root_node_id: nodeId };
@@ -234,43 +178,18 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     set({ headNodeId: nodeId });
   },
 
-  branchFromNode: (nodeId: string, label: string): string => {
-    const { activeConversationId, nodes } = get();
-    if (!activeConversationId) return '';
-
-    const newNodeId = crypto.randomUUID();
-    const parentNode = nodes[nodeId];
-    const newNode: ConversationNode = {
-      node_id: newNodeId,
-      conversation_id: activeConversationId,
-      root_id: activeConversationId,
-      parent_id: nodeId,
-      merge_parent_id: null,
-      parent_ids: [nodeId],
-      children_ids: [],
-      prompt: '',
-      response: '',
-      model_used: parentNode?.model_used ?? 'deepseek',
-      execution_context: 'local',
-      is_sensitive: false,
-      branch_label: label,
-      is_merge_node: false,
-      pruned: false,
-      timestamp: new Date().toISOString(),
-    };
-
+  // Branching moves HEAD to the target node so the next commit becomes its child.
+  // We also store the intended branch target so loadNodes doesn't overwrite it.
+  branchFromNode: (nodeId: string, _label: string): string => {
     set((state) => {
-      const updatedNodes = { ...state.nodes, [newNodeId]: newNode };
-      if (updatedNodes[nodeId]) {
-        updatedNodes[nodeId] = {
-          ...updatedNodes[nodeId],
-          children_ids: [...updatedNodes[nodeId].children_ids, newNodeId],
-        };
+      // If the node exists in the store, set head directly.
+      // If not yet loaded (race with loadNodes), still set it — loadNodes will preserve it.
+      if (state.nodes[nodeId] || true) {
+        return { headNodeId: nodeId };
       }
-      return { nodes: updatedNodes, headNodeId: newNodeId };
+      return {};
     });
-
-    return newNodeId;
+    return nodeId;
   },
 
   pruneNode: (nodeId: string) => {
@@ -278,14 +197,12 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       const allIds = collectDescendants(nodeId, state.nodes);
       const updatedNodes = { ...state.nodes };
 
-      // Mark all descendants (and the node itself) as pruned
       for (const id of allIds) {
         if (updatedNodes[id]) {
           updatedNodes[id] = { ...updatedNodes[id], pruned: true };
         }
       }
 
-      // Remove from parent's children_ids
       const target = state.nodes[nodeId];
       if (target?.parent_id && updatedNodes[target.parent_id]) {
         updatedNodes[target.parent_id] = {
@@ -309,22 +226,23 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     nodeIdA: string,
     nodeIdB: string,
     synthesisResponse: string,
+    mergeNodeId?: string,
   ) => {
     const { activeConversationId } = get();
     if (!activeConversationId) return;
 
-    const mergeNodeId = crypto.randomUUID();
+    const id = mergeNodeId ?? crypto.randomUUID();
     const mergeNode: ConversationNode = {
-      node_id: mergeNodeId,
+      node_id: id,
       conversation_id: activeConversationId,
       root_id: activeConversationId,
       parent_id: nodeIdA,
       merge_parent_id: nodeIdB,
       parent_ids: [nodeIdA, nodeIdB],
       children_ids: [],
-      prompt: `[Merge of ${nodeIdA} and ${nodeIdB}]`,
+      prompt: `[Merge of ${nodeIdA.slice(0, 8)} and ${nodeIdB.slice(0, 8)}]`,
       response: synthesisResponse,
-      model_used: 'deepseek',
+      model_used: 'gemma4',
       execution_context: 'local',
       is_sensitive: false,
       branch_label: null,
@@ -334,24 +252,20 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     };
 
     set((state) => {
-      const updatedNodes = { ...state.nodes, [mergeNodeId]: mergeNode };
+      const updatedNodes = { ...state.nodes, [id]: mergeNode };
       if (updatedNodes[nodeIdA]) {
         updatedNodes[nodeIdA] = {
           ...updatedNodes[nodeIdA],
-          children_ids: [...updatedNodes[nodeIdA].children_ids, mergeNodeId],
+          children_ids: [...updatedNodes[nodeIdA].children_ids, id],
         };
       }
       if (updatedNodes[nodeIdB]) {
         updatedNodes[nodeIdB] = {
           ...updatedNodes[nodeIdB],
-          children_ids: [...updatedNodes[nodeIdB].children_ids, mergeNodeId],
+          children_ids: [...updatedNodes[nodeIdB].children_ids, id],
         };
       }
-      return {
-        nodes: updatedNodes,
-        headNodeId: mergeNodeId,
-        selectedNodeIds: [],
-      };
+      return { nodes: updatedNodes, headNodeId: id, selectedNodeIds: [] };
     });
   },
 
@@ -359,13 +273,9 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     set((state) => {
       const { selectedNodeIds } = state;
       if (selectedNodeIds.includes(nodeId)) {
-        // Toggle off
         return { selectedNodeIds: selectedNodeIds.filter((id) => id !== nodeId) };
       }
-      if (selectedNodeIds.length >= 2) {
-        // Already at max — ignore
-        return {};
-      }
+      if (selectedNodeIds.length >= 2) return {};
       return { selectedNodeIds: [...selectedNodeIds, nodeId] };
     });
   },
@@ -375,7 +285,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
   },
 
   setActiveConversation: (id: string | null) => {
-    set({ activeConversationId: id });
+    set({ activeConversationId: id, nodes: {}, headNodeId: null, selectedNodeIds: [] });
   },
 
   getThreadToHead: (): ConversationNode[] => {
@@ -387,8 +297,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
 
     while (currentId !== null) {
       const node: ConversationNode | undefined = nodes[currentId];
-      if (!node) break;
-      if (node.pruned) break;  // ancestry chain is invalid from here
+      if (!node || node.pruned) break;
       thread.push(node);
       currentId = node.parent_id;
     }

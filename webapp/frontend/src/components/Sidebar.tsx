@@ -1,6 +1,8 @@
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, MessageSquare, X, HelpCircle } from 'lucide-react';
 import { useConversationStore } from '../store/useConversationStore';
+import { fetchConversations } from '../api/client';
 import GX10TelemetryWidget from './GX10TelemetryWidget';
 
 interface SidebarProps {
@@ -11,10 +13,21 @@ export default function Sidebar({ onClose }: SidebarProps) {
   const navigate = useNavigate();
   const conversations = useConversationStore((s) => s.conversations);
   const activeConversationId = useConversationStore((s) => s.activeConversationId);
+  const [dbConversations, setDbConversations] = useState<{ root_id: string; title: string }[]>([]);
+
+  useEffect(() => {
+    fetchConversations()
+      .then((data) => setDbConversations(data))
+      .catch(() => {});
+  }, [activeConversationId]);
 
   const handleNewChat = () => {
     navigate('/');
   };
+
+  // Merge local store conversations with DB ones, deduplicating by id
+  const localIds = new Set(conversations.map((c) => c.id));
+  const dbOnlyConvs = dbConversations.filter((c) => !localIds.has(c.root_id));
 
   return (
     <div className="w-60 flex-shrink-0 h-screen bg-tenet-surface border-r border-tenet-border flex flex-col">
@@ -53,6 +66,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
 
       {/* Conversation list */}
       <div className="flex-1 overflow-y-auto">
+        {/* Local store conversations (have titles) */}
         {conversations.map((conv) => {
           const isActive = conv.id === activeConversationId;
           return (
@@ -70,17 +84,33 @@ export default function Sidebar({ onClose }: SidebarProps) {
             </button>
           );
         })}
+
+        {/* DB conversations (have real titles from Ollama) */}
+        {dbOnlyConvs.map((conv) => {
+          const isActive = conv.root_id === activeConversationId;
+          return (
+            <button
+              key={conv.root_id}
+              onClick={() => navigate(`/c/${conv.root_id}`)}
+              className={`w-full flex items-center gap-2 px-4 py-2 text-sm text-left transition-colors ${
+                isActive
+                  ? 'bg-tenet-teal/10 text-tenet-teal'
+                  : 'text-gray-400 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <MessageSquare size={14} className="flex-shrink-0 opacity-70" />
+              <span className="truncate">{conv.title}</span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Bottom section */}
       <div className="border-t border-tenet-border">
-        {/* Support link */}
         <button className="w-full flex items-center gap-2 px-4 py-3 text-sm text-gray-500 hover:text-white hover:bg-white/5 transition-colors">
           <HelpCircle size={14} className="flex-shrink-0" />
           <span>Support</span>
         </button>
-
-        {/* GX10 widget */}
         <GX10TelemetryWidget />
       </div>
     </div>

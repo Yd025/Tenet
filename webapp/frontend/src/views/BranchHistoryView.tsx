@@ -10,22 +10,13 @@ import type { ConversationNode } from '../types';
 import ConversationNodeSVG from '../components/ConversationNode';
 import type { ConversationNodeData } from '../components/ConversationNode';
 
-// ---------------------------------------------------------------------------
-// Props
-// ---------------------------------------------------------------------------
 interface BranchHistoryViewProps {
   setActiveTab: (tab: 'chats' | 'branch-history') => void;
+  selectedModel: string;
 }
 
-// ---------------------------------------------------------------------------
-// Layout constants
-// ---------------------------------------------------------------------------
 const NODE_H_SPACING = 180;
 const NODE_V_SPACING = 90;
-
-// ---------------------------------------------------------------------------
-// Hierarchy builder
-// ---------------------------------------------------------------------------
 
 interface TreeDatum {
   id: string;
@@ -33,9 +24,7 @@ interface TreeDatum {
   node: ConversationNode;
 }
 
-function buildTreeData(
-  storeNodes: Record<string, ConversationNode>,
-): TreeDatum[] {
+function buildTreeData(storeNodes: Record<string, ConversationNode>): TreeDatum[] {
   const active = Object.values(storeNodes).filter((n) => !n.pruned);
   return active.map((n) => ({
     id: n.node_id,
@@ -44,9 +33,7 @@ function buildTreeData(
   }));
 }
 
-function buildLabels(
-  storeNodes: Record<string, ConversationNode>,
-): { labelMap: Record<string, string>; sublabelMap: Record<string, string> } {
+function buildLabels(storeNodes: Record<string, ConversationNode>) {
   const activeNodes = Object.values(storeNodes)
     .filter((n) => !n.pruned)
     .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
@@ -61,7 +48,7 @@ function buildLabels(
       branchCount += 1;
       const parentLabel = node.parent_id ? (labelMap[node.parent_id] ?? '?') : '?';
       labelMap[node.node_id] = `b${branchCount}/${parentLabel}`;
-      sublabelMap[node.node_id] = node.branch_label;
+      sublabelMap[node.node_id] = node.prompt.slice(0, 38) || node.branch_label;
     } else if (node.is_merge_node) {
       trunkCount += 1;
       labelMap[node.node_id] = `v${trunkCount}`;
@@ -76,26 +63,16 @@ function buildLabels(
   return { labelMap, sublabelMap };
 }
 
-// ---------------------------------------------------------------------------
-// Curved link path generator (vertical orientation)
-// ---------------------------------------------------------------------------
-function linkPath(
-  sx: number,
-  sy: number,
-  tx: number,
-  ty: number,
-): string {
+function linkPath(sx: number, sy: number, tx: number, ty: number): string {
   const midY = (sy + ty) / 2;
   return `M${sx},${sy} C${sx},${midY} ${tx},${midY} ${tx},${ty}`;
 }
 
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
-export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewProps) {
+export default function BranchHistoryView({ setActiveTab, selectedModel }: BranchHistoryViewProps) {
   const storeNodes = useConversationStore((s) => s.nodes);
   const headNodeId = useConversationStore((s) => s.headNodeId);
   const selectedNodeIds = useConversationStore((s) => s.selectedNodeIds);
+  const activeConversationId = useConversationStore((s) => s.activeConversationId);
   const checkoutNode = useConversationStore((s) => s.checkoutNode);
   const branchFromNode = useConversationStore((s) => s.branchFromNode);
   const pruneNode = useConversationStore((s) => s.pruneNode);
@@ -106,11 +83,11 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
   const svgRef = useRef<SVGSVGElement>(null);
   const gRef = useRef<SVGGElement>(null);
 
-  // Context menu state
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
   const ctxMenuRef = useRef<HTMLDivElement>(null);
+  const [mergeLoading, setMergeLoading] = useState(false);
+  const [mergeError, setMergeError] = useState<string | null>(null);
 
-  // Close context menu on outside click
   useEffect(() => {
     if (!ctxMenu) return;
     function handleClickOutside(e: MouseEvent) {
@@ -135,27 +112,24 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
     [checkoutNode, branchFromNode, pruneNode, selectNodeForMerge, clearMergeSelection],
   );
 
-  // ---------------------------------------------------------------------------
-  // D3 hierarchy layout
-  // ---------------------------------------------------------------------------
   const { layoutNodes, mergeEdges } = useMemo(() => {
     const treeData = buildTreeData(storeNodes);
     if (treeData.length === 0) {
-      return { layoutNodes: [] as HierarchyPointNode<TreeDatum>[], mergeEdges: [] as { source: HierarchyPointNode<TreeDatum>; target: HierarchyPointNode<TreeDatum> }[] };
+      return {
+        layoutNodes: [] as HierarchyPointNode<TreeDatum>[],
+        mergeEdges: [] as { source: HierarchyPointNode<TreeDatum>; target: HierarchyPointNode<TreeDatum> }[],
+      };
     }
 
-    // Orphan guard: ensure every parentId points to an active node
     const activeIds = new Set(treeData.map((d) => d.id));
     const cleaned = treeData.map((d) => ({
       ...d,
       parentId: d.parentId && activeIds.has(d.parentId) ? d.parentId : null,
     }));
 
-    // Ensure exactly one root
     const roots = cleaned.filter((d) => d.parentId === null);
     if (roots.length === 0) return { layoutNodes: [], mergeEdges: [] };
 
-    // If multiple roots, attach extras to first root
     if (roots.length > 1) {
       const primaryRoot = roots[0];
       for (let i = 1; i < roots.length; i++) {
@@ -171,10 +145,8 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
     const root = stratifier(cleaned);
     const layout = d3Tree<TreeDatum>().nodeSize([NODE_H_SPACING, NODE_V_SPACING]);
     const laidOut = layout(root);
-
     const nodes = laidOut.descendants();
 
-    // Build merge edges (not part of tree hierarchy)
     const nodeById = new Map(nodes.map((n) => [n.data.id, n]));
     const mEdges: { source: HierarchyPointNode<TreeDatum>; target: HierarchyPointNode<TreeDatum> }[] = [];
     for (const n of nodes) {
@@ -189,9 +161,9 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
 
   const { labelMap, sublabelMap } = useMemo(() => buildLabels(storeNodes), [storeNodes]);
 
-  // ---------------------------------------------------------------------------
-  // Zoom setup
-  // ---------------------------------------------------------------------------
+  const zoomBehaviorRef = useRef<ReturnType<typeof d3Zoom<SVGSVGElement, unknown>> | null>(null);
+
+  // Set up zoom once on mount
   useEffect(() => {
     const svg = svgRef.current;
     const g = gRef.current;
@@ -203,47 +175,47 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
         select(g).attr('transform', event.transform.toString());
       });
 
-    const svgSel = select(svg);
-    svgSel.call(zoomBehavior);
-
-    // Fit view on data change
-    if (layoutNodes.length > 0) {
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      for (const n of layoutNodes) {
-        if (n.x < minX) minX = n.x;
-        if (n.x > maxX) maxX = n.x;
-        if (n.y < minY) minY = n.y;
-        if (n.y > maxY) maxY = n.y;
-      }
-
-      const padding = 80;
-      const treeWidth = maxX - minX + padding * 2;
-      const treeHeight = maxY - minY + padding * 2;
-
-      const svgRect = svg.getBoundingClientRect();
-      const svgW = svgRect.width || 800;
-      const svgH = svgRect.height || 600;
-
-      const scale = Math.min(svgW / treeWidth, svgH / treeHeight, 1.5);
-      const cx = (minX + maxX) / 2;
-      const cy = (minY + maxY) / 2;
-      const tx = svgW / 2 - cx * scale;
-      const ty = svgH / 2 - cy * scale;
-
-      svgSel.call(
-        zoomBehavior.transform,
-        zoomIdentity.translate(tx, ty).scale(scale),
-      );
-    }
+    zoomBehaviorRef.current = zoomBehavior;
+    select(svg).call(zoomBehavior);
 
     return () => {
-      svgSel.on('.zoom', null);
+      select(svg).on('.zoom', null);
     };
+  }, []);
+
+  // Fit view only when the node count changes (new nodes added or first load)
+  const prevNodeCount = useRef(0);
+  useEffect(() => {
+    const svg = svgRef.current;
+    const zoomBehavior = zoomBehaviorRef.current;
+    if (!svg || !zoomBehavior || layoutNodes.length === 0) return;
+    if (layoutNodes.length === prevNodeCount.current) return;
+    prevNodeCount.current = layoutNodes.length;
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const n of layoutNodes) {
+      if (n.x < minX) minX = n.x;
+      if (n.x > maxX) maxX = n.x;
+      if (n.y < minY) minY = n.y;
+      if (n.y > maxY) maxY = n.y;
+    }
+
+    const padding = 80;
+    const treeWidth = maxX - minX + padding * 2;
+    const treeHeight = maxY - minY + padding * 2;
+    const svgRect = svg.getBoundingClientRect();
+    const svgW = svgRect.width || 800;
+    const svgH = svgRect.height || 600;
+    const scale = Math.min(svgW / treeWidth, svgH / treeHeight, 1.5);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+
+    select(svg).call(
+      zoomBehavior.transform,
+      zoomIdentity.translate(svgW / 2 - cx * scale, svgH / 2 - cy * scale).scale(scale),
+    );
   }, [layoutNodes]);
 
-  // ---------------------------------------------------------------------------
-  // Context menu handler (from SVG node)
-  // ---------------------------------------------------------------------------
   const handleNodeContextMenu = useCallback(
     (e: React.MouseEvent, nodeId: string) => {
       e.preventDefault();
@@ -252,17 +224,22 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
     [],
   );
 
-  // ---------------------------------------------------------------------------
-  // Floating action bar handlers
-  // ---------------------------------------------------------------------------
   async function handleMerge() {
     if (selectedNodeIds.length !== 2) return;
     const [a, b] = selectedNodeIds;
+    const rootId = activeConversationId ?? storeNodes[a]?.root_id ?? 'default';
+
+    setMergeLoading(true);
+    setMergeError(null);
     try {
-      const result = await fetchMerge({ node_id_a: a, node_id_b: b });
-      mergeNodes(a, b, result.response);
+      const result = await fetchMerge({ node_id_a: a, node_id_b: b, root_id: rootId, model: selectedModel });
+      // Use the node_id returned by the backend so the DB and store stay in sync
+      mergeNodes(a, b, result.response, result.node_id);
     } catch (err) {
       console.error('Merge failed:', err);
+      setMergeError('Merge failed — check console for details.');
+    } finally {
+      setMergeLoading(false);
     }
   }
 
@@ -270,35 +247,37 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
     if (selectedNodeIds.length !== 1) return;
     branchFromNode(selectedNodeIds[0], 'New Branch');
     clearMergeSelection();
+    setActiveTab('chats');
   }
 
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
+  const nodeCount = Object.values(storeNodes).filter((n) => !n.pruned).length;
+
   return (
     <div className="flex-1 flex flex-col relative" style={{ background: '#0B0B0C' }}>
-      {/* Back button */}
-      <div className="absolute top-3 left-3 z-10">
+      {/* Header bar */}
+      <div className="absolute top-3 left-3 right-3 z-10 flex items-center justify-between">
         <button
           onClick={() => setActiveTab('chats')}
           className="text-xs text-tenet-teal underline hover:opacity-80 transition-opacity"
         >
           &larr; Back to Chats
         </button>
+        <span className="text-xs text-gray-600 font-mono">{nodeCount} node{nodeCount !== 1 ? 's' : ''}</span>
       </div>
 
+      {/* Empty state */}
+      {layoutNodes.length === 0 && (
+        <div className="flex-1 flex items-center justify-center">
+          <p className="text-gray-600 text-sm">No conversation nodes yet. Start chatting to build your branch history.</p>
+        </div>
+      )}
+
       {/* SVG canvas */}
-      <svg
-        ref={svgRef}
-        className="flex-1 w-full h-full"
-        style={{ minHeight: 0 }}
-      >
+      <svg ref={svgRef} className="flex-1 w-full h-full" style={{ minHeight: 0 }}>
         <g ref={gRef}>
-          {/* Tree links */}
           {layoutNodes.map((node) => {
             if (!node.parent) return null;
-            const isBranch =
-              node.data.node.branch_label !== null || node.data.node.is_merge_node;
+            const isBranch = node.data.node.branch_label !== null || node.data.node.is_merge_node;
             return (
               <path
                 key={`link-${node.data.id}`}
@@ -312,7 +291,6 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
             );
           })}
 
-          {/* Merge links */}
           {mergeEdges.map((edge) => (
             <path
               key={`merge-${edge.source.data.id}-${edge.target.data.id}`}
@@ -325,7 +303,6 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
             />
           ))}
 
-          {/* Nodes */}
           {layoutNodes.map((node) => {
             const d = node.data.node;
             const nodeData: ConversationNodeData = {
@@ -351,35 +328,33 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
         </g>
       </svg>
 
-      {/* Context menu (HTML overlay) */}
+      {/* Context menu */}
       {ctxMenu && (
         <div
           ref={ctxMenuRef}
           className="fixed z-50 bg-tenet-surface border border-tenet-border rounded shadow-lg py-1 min-w-max"
-          style={{
-            left: ctxMenu.x,
-            top: ctxMenu.y,
-            boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
-          }}
+          style={{ left: ctxMenu.x, top: ctxMenu.y, boxShadow: '0 4px 16px rgba(0,0,0,0.6)' }}
         >
           <button
             className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-white/10 transition-colors"
-            onClick={() => {
-              handlers.onBranch(ctxMenu.nodeId);
-              setCtxMenu(null);
-            }}
+            onClick={() => { handlers.onBranch(ctxMenu.nodeId); setCtxMenu(null); setActiveTab('chats'); }}
           >
             &#x238B; Branch from Here
           </button>
           <button
             className="block w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-white/10 transition-colors"
-            onClick={() => {
-              handlers.onPrune(ctxMenu.nodeId);
-              setCtxMenu(null);
-            }}
+            onClick={() => { handlers.onPrune(ctxMenu.nodeId); setCtxMenu(null); }}
           >
             &#x2702; Prune
           </button>
+        </div>
+      )}
+
+      {/* Merge error toast */}
+      {mergeError && (
+        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-30 bg-red-900/80 border border-red-700/50 rounded px-4 py-2 text-xs text-red-300">
+          {mergeError}
+          <button className="ml-3 text-red-400 hover:text-white" onClick={() => setMergeError(null)}>✕</button>
         </div>
       )}
 
@@ -389,14 +364,30 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
           className="absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-3 items-center bg-tenet-surface border border-tenet-border rounded-lg px-4 py-2 shadow-xl z-20"
           style={{ boxShadow: '0 4px 24px rgba(0,0,0,0.7)' }}
         >
+          {/* Selection indicator */}
+          <span className="text-xs text-gray-500 font-mono">
+            {selectedNodeIds.length}/2 selected
+          </span>
+
           {selectedNodeIds.length === 2 && (
             <button
               onClick={handleMerge}
-              className="px-4 py-1.5 rounded bg-tenet-teal text-black font-semibold text-sm hover:opacity-90 transition-opacity"
+              disabled={mergeLoading}
+              className={`px-4 py-1.5 rounded bg-tenet-teal text-black font-semibold text-sm transition-opacity ${
+                mergeLoading ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-90'
+              }`}
             >
-              Merge (Select 2)
+              {mergeLoading ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-3 h-3 border-2 border-black/30 border-t-black rounded-full animate-spin" />
+                  Merging…
+                </span>
+              ) : (
+                '⌥ Merge Nodes'
+              )}
             </button>
           )}
+
           {selectedNodeIds.length === 1 && (
             <button
               onClick={handleBranchFromSelected}
@@ -405,6 +396,7 @@ export default function BranchHistoryView({ setActiveTab }: BranchHistoryViewPro
               &#x238B; Branch from Here
             </button>
           )}
+
           <button
             onClick={clearMergeSelection}
             className="text-gray-400 text-xs hover:text-white transition-colors"

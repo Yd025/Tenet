@@ -36,12 +36,12 @@ export interface StreamChunk {
   node_id?: string;
 }
 
-// POST /chat/stream — returns an async generator of chunks, plus an abort fn.
+// POST /chat/stream — streams tokens via SSE, returns the backend node_id when done.
 export function streamChat(
   params: StreamChatParams,
   signal: AbortSignal,
   onChunk: (chunk: StreamChunk) => void,
-): Promise<void> {
+): Promise<string | null> {
   return fetch(`${API_BASE}/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -56,6 +56,7 @@ export function streamChat(
 
     const decoder = new TextDecoder();
     let buffer = '';
+    let savedNodeId: string | null = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -71,12 +72,19 @@ export function streamChat(
         const json = trimmed.slice(5).trim();
         if (!json || json === '[DONE]') continue;
         try {
-          onChunk(JSON.parse(json) as StreamChunk);
+          const parsed = JSON.parse(json);
+          if (parsed.type === 'node_saved') {
+            savedNodeId = parsed.node_id;
+          } else {
+            onChunk(parsed as StreamChunk);
+          }
         } catch {
           // ignore malformed SSE lines
         }
       }
     }
+
+    return savedNodeId;
   });
 }
 
@@ -135,21 +143,51 @@ export async function fetchChat(params: {
   return handleResponse(response);
 }
 
-// POST /api/merge (legacy two-node merge — kept for BranchHistoryView compat)
+// POST /api/merge/nodes (two-node merge — used by BranchHistoryView)
 export async function fetchMerge(params: {
   node_id_a: string;
   node_id_b: string;
+  root_id?: string;
+  model?: string;
 }): Promise<{ response: string; node_id: string }> {
-  const response = await fetch(`${API_BASE}/merge`, {
+  const response = await fetch(`${API_BASE}/merge/nodes`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
+    body: JSON.stringify({
+      node_ids: [params.node_id_a, params.node_id_b],
+      root_id: params.root_id ?? 'default',
+      model: params.model ?? 'gemma4',
+    }),
   });
   return handleResponse(response);
 }
 
-// GET /api/models
-export async function fetchModels(): Promise<ModelId[]> {
-  const response = await fetch(`${API_BASE}/models`);
+// ---------------------------------------------------------------------------
+// Nodes
+// ---------------------------------------------------------------------------
+
+// GET /api/nodes?root_id=<id>
+export async function fetchNodes(rootId: string): Promise<import('../types').ConversationNode[]> {
+  const response = await fetch(`${API_BASE}/nodes?root_id=${encodeURIComponent(rootId)}`);
+  if (!response.ok) return [];
+  return response.json();
+}
+
+// GET /api/nodes/:node_id
+export async function fetchNode(nodeId: string): Promise<import('../types').ConversationNode> {
+  const response = await fetch(`${API_BASE}/nodes/${encodeURIComponent(nodeId)}`);
   return handleResponse(response);
+}
+
+// GET /api/roots
+export async function fetchRoots(): Promise<{ roots: string[] }> {
+  const response = await fetch(`${API_BASE}/roots`);
+  return handleResponse(response);
+}
+
+// GET /api/conversations
+export async function fetchConversations(): Promise<{ root_id: string; title: string; created_at: string }[]> {
+  const response = await fetch(`${API_BASE}/conversations`);
+  if (!response.ok) return [];
+  return response.json();
 }

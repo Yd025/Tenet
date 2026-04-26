@@ -22,8 +22,8 @@ export default function GX10TelemetryWidget() {
     return () => clearInterval(interval);
   }, []);
 
-  const tempPct = stats ? Math.min(100, Math.max(0, (stats.temp_c - 40) / 60 * 100)) : 0;
-  const isActive = stats ? stats.utilization > 0 : false;
+  const tempPct = stats?.temp_c != null ? Math.min(100, Math.max(0, (stats.temp_c - 40) / 60 * 100)) : 0;
+  const isActive = stats?.utilization != null ? stats.utilization > 0 : false;
 
   if (stats === null) {
     return (
@@ -66,13 +66,13 @@ export default function GX10TelemetryWidget() {
       </div>
 
       {/* Blackwell Temp */}
-      <StatRow label="BLACKWELL TEMP" value={`${stats.temp_c}°C`} pct={tempPct} />
+      <StatRow label="BLACKWELL TEMP" value={stats.temp_c != null ? `${stats.temp_c}°C` : 'N/A'} pct={tempPct} />
 
       {/* GPU Utilization — pulses when active */}
       <div className={`mb-2 ${isActive ? 'opacity-100' : 'opacity-70'}`}>
         <div className="flex justify-between mb-1">
           <span className="text-xs text-gray-600 uppercase tracking-wider">GPU UTILIZATION</span>
-          <span className="text-xs text-white font-mono">{stats.utilization}%</span>
+          <span className="text-xs text-white font-mono">{stats.utilization ?? 'N/A'}{stats.utilization != null ? '%' : ''}</span>
         </div>
         <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
           <div
@@ -81,19 +81,19 @@ export default function GX10TelemetryWidget() {
                 ? 'bg-gradient-to-r from-tenet-teal to-cyan-400 animate-pulse'
                 : 'bg-gradient-to-r from-tenet-teal to-cyan-400'
             }`}
-            style={{ width: `${stats.utilization}%` }}
+            style={{ width: `${stats.utilization ?? 0}%` }}
           />
         </div>
       </div>
 
       {/* VRAM */}
-      <StatRow label="VRAM" value={`${stats.vram_gb.toFixed(1)} GB`} pct={Math.min(100, stats.vram_gb / 80 * 100)} />
+      <StatRow label="VRAM" value={stats.vram_gb != null ? `${stats.vram_gb.toFixed(1)} GB` : 'N/A'} pct={stats.vram_gb != null ? Math.min(100, stats.vram_gb / 80 * 100) : 0} />
 
       {/* TPS */}
       <div className="mt-2">
         <div className="text-xs text-gray-600 uppercase tracking-wider mb-1">TOKENS / SEC</div>
         <div className="text-tenet-teal text-xl font-bold font-mono">
-          {stats.tps} <span className="text-gray-600 text-xs font-normal">TPS</span>
+          {stats.tps ?? '—'} <span className="text-gray-600 text-xs font-normal">TPS</span>
         </div>
       </div>
 

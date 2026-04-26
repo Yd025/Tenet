@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useConversationStore } from '../store/useConversationStore';
-import { fetchChat } from '../api/client';
+import { streamChat } from '../api/client';
 import type { ModelId, ConversationNode } from '../types';
 import MessageBubble from '../components/MessageBubble';
 import CommitInputBar from '../components/CommitInputBar';
@@ -11,15 +13,17 @@ interface ChatViewProps {
 
 export default function ChatView({ selectedModel }: ChatViewProps) {
   const [isLoading, setIsLoading] = useState(false);
+  const [streamingText, setStreamingText] = useState('');
+  const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const nodes = useConversationStore((s) => s.nodes);
   const headNodeId = useConversationStore((s) => s.headNodeId);
-  const commitMessage = useConversationStore((s) => s.commitMessage);
   const activeConversationId = useConversationStore((s) => s.activeConversationId);
+  const commitMessage = useConversationStore((s) => s.commitMessage);
 
-  // Build thread inline so it's driven by reactive subscriptions, not get()
   const thread = useMemo(() => {
     if (!headNodeId) return [];
     const result: ConversationNode[] = [];
@@ -35,37 +39,57 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [nodes, headNodeId]);
+  }, [thread, streamingText]);
 
   const handleCommit = async (prompt: string, isSensitive: boolean) => {
     if (!activeConversationId) return;
-    setIsLoading(true);
-    setError(null);
-    try {
-      const result = await fetchChat({
-        prompt,
-        conversation_id: activeConversationId,
-        branch_id: headNodeId ?? '',
-        model: selectedModel as ModelId,
-        is_sensitive: isSensitive,
-      });
 
-      commitMessage(prompt, result.response, result.model_used, isSensitive);
-    } catch (err) {
+    // Cancel any in-flight request
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setIsLoading(true);
+    setStreamingText('');
+    setPendingPrompt(prompt);
+    setError(null);
+
+    let fullText = '';
+    let backendNodeId: string | null = null;
+
+    try {
+      backendNodeId = await streamChat(
+        {
+          prompt,
+          parent_id: headNodeId,
+          root_id: activeConversationId,
+          model: selectedModel as ModelId,
+        },
+        controller.signal,
+        (chunk) => {
+          fullText += chunk.token;
+          setStreamingText(fullText);
+        },
+      );
+
+      // Use the backend's node_id so parent_id on the next message matches MongoDB
+      commitMessage(prompt, fullText, selectedModel as ModelId, isSensitive, backendNodeId ?? undefined);
+      setStreamingText('');
+      setPendingPrompt(null);
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') return;
       console.error('Chat failed:', err);
-      setError('Something went wrong. Check the console for details.');
+      setError('Something went wrong. Check the console.');
+      setPendingPrompt(null);
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    // min-h-0 is required at every flex-col level so the scroll container
-    // gets a real constrained height instead of expanding to content size
     <div className="flex-1 flex flex-col min-h-0 bg-tenet-bg">
-      {/* Thread scroll area */}
       <div className="flex-1 overflow-y-auto min-h-0 px-6 py-6 space-y-2">
-        {thread.length === 0 ? (
+        {thread.length === 0 && !isLoading ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-center">
               <p className="text-gray-600 text-sm">Start your conversation...</p>
@@ -77,28 +101,46 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
             <MessageBubble
               key={node.node_id}
               node={node}
-              isHead={node.node_id === headNodeId}
+              isHead={node.node_id === headNodeId && !isLoading}
             />
           ))
         )}
 
-        {/* Loading indicator */}
+        {/* Live streaming bubble */}
         {isLoading && (
-          <div className="flex items-start gap-3 mb-6">
-            <div className="w-7 h-7 rounded-full bg-tenet-teal/20 border border-tenet-teal/30 flex items-center justify-center flex-shrink-0 mt-1">
-              <span className="text-tenet-teal text-xs font-bold">T</span>
-            </div>
-            <div className="bg-tenet-surface border-l-2 border-tenet-teal rounded-2xl px-4 py-3">
-              <span className="inline-flex gap-1 items-center">
-                <span className="w-1.5 h-1.5 rounded-full bg-tenet-teal animate-bounce" style={{ animationDelay: '0ms' }} />
-                <span className="w-1.5 h-1.5 rounded-full bg-tenet-teal animate-bounce" style={{ animationDelay: '150ms' }} />
-                <span className="w-1.5 h-1.5 rounded-full bg-tenet-teal animate-bounce" style={{ animationDelay: '300ms' }} />
-              </span>
+          <div className="flex flex-col gap-3 mb-6">
+            {/* Optimistic user prompt bubble */}
+            {pendingPrompt && (
+              <div className="flex justify-end">
+                <div className="bg-gray-800 text-white rounded-2xl rounded-tr-sm px-4 py-3 max-w-[72%] text-sm leading-relaxed">
+                  {pendingPrompt}
+                </div>
+              </div>
+            )}
+
+            {/* Streaming response bubble */}
+            <div className="flex items-start gap-3">
+              <div className="w-7 h-7 rounded-full bg-tenet-teal/20 border border-tenet-teal/30 flex items-center justify-center flex-shrink-0 mt-1">
+                <span className="text-tenet-teal text-xs font-bold">T</span>
+              </div>
+              <div className="bg-tenet-surface border-l-2 border-tenet-teal rounded-2xl px-4 py-3 max-w-2xl flex-1">
+                {streamingText ? (
+                  <div className="text-sm text-gray-200 leading-relaxed prose prose-invert prose-sm max-w-none">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
+                    <span className="inline-block w-1.5 h-4 bg-tenet-teal ml-0.5 animate-pulse align-middle" />
+                  </div>
+                ) : (
+                  <span className="inline-flex gap-1 items-center">
+                    <span className="w-1.5 h-1.5 rounded-full bg-tenet-teal animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-tenet-teal animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-tenet-teal animate-bounce" style={{ animationDelay: '300ms' }} />
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         )}
 
-        {/* Error banner */}
         {error && (
           <div className="mx-auto max-w-lg bg-red-900/30 border border-red-700/50 rounded-lg px-4 py-2 text-sm text-red-300">
             {error}
@@ -108,7 +150,6 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
         <div ref={bottomRef} />
       </div>
 
-      {/* Input bar — flex-shrink-0 prevents it from being squashed */}
       <div className="flex-shrink-0">
         <CommitInputBar onCommit={handleCommit} isLoading={isLoading} />
       </div>
