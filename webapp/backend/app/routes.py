@@ -60,6 +60,19 @@ def serialize_node(doc: dict) -> dict:
     doc.pop("_id", None)
     return doc
 
+
+def _extract_json_block(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        for part in parts:
+            candidate = part.strip()
+            if candidate.startswith("json"):
+                return candidate[4:].strip()
+            if candidate.startswith("[") or candidate.startswith("{"):
+                return candidate
+    return text
+
 # --- 1. REAL TELEMETRY ---
 @router.get("/telemetry")
 async def get_telemetry():
@@ -150,15 +163,90 @@ async def generate_title(prompt: str, model: str) -> str:
     except Exception:
         return prompt[:40]
 
+
+def _tokenize(text: str) -> set[str]:
+    return {t for t in ''.join(c.lower() if c.isalnum() else ' ' for c in text).split() if len(t) > 2}
+
+
+def _candidate_score(prompt_tokens: set[str], node: dict) -> int:
+    node_tokens = _tokenize(f"{node.get('prompt', '')} {node.get('response', '')}")
+    overlap = len(prompt_tokens.intersection(node_tokens))
+    recency_bonus = 1 if node.get("metadata", {}).get("timestamp") else 0
+    return overlap * 10 + recency_bonus
+
+
+async def choose_auto_parent_id(req: ChatRequest) -> str | None:
+    nodes = await nodes_collection.find({"root_id": req.root_id}).to_list(1000)
+    if not nodes:
+        return None
+
+    prompt_tokens = _tokenize(req.prompt)
+    scored = sorted(
+        nodes,
+        key=lambda n: (_candidate_score(prompt_tokens, n), n.get("metadata", {}).get("timestamp", "")),
+        reverse=True,
+    )
+    candidates = scored[:8]
+
+    # Fast fallback when no useful candidates exist.
+    if not candidates:
+        return None
+
+    candidate_lines = []
+    for c in candidates:
+        snippet = (c.get("prompt", "") + " " + c.get("response", "")).strip().replace("\n", " ")
+        candidate_lines.append(f"- {c.get('node_id')}: {snippet[:220]}")
+
+    selector_prompt = (
+        "You are an auto-branch selector for a conversation graph.\n"
+        "Pick exactly one best parent node id for the next user prompt.\n"
+        "Return strict JSON with this schema only: "
+        '{"parent_id":"<node_id>","reason":"<short reason>"}\n\n'
+        f'New prompt: "{req.prompt}"\n'
+        "Candidates:\n"
+        + "\n".join(candidate_lines)
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={
+                    "model": req.model,
+                    "prompt": selector_prompt,
+                    "stream": False,
+                },
+            )
+            resp.raise_for_status()
+            raw = resp.json().get("response", "").strip()
+            parsed = json.loads(raw)
+            parent_id = parsed.get("parent_id")
+            if isinstance(parent_id, str) and any(n.get("node_id") == parent_id for n in candidates):
+                return parent_id
+    except Exception as e:
+        logger.warning(f"Auto branching selector failed, using fallback: {e}")
+
+    # Fallback: most recent candidate by timestamp.
+    candidates_sorted = sorted(
+        candidates,
+        key=lambda n: n.get("metadata", {}).get("timestamp", ""),
+        reverse=True,
+    )
+    return candidates_sorted[0].get("node_id")
+
 # --- 5. STREAMING CHAT (Branching) ---
 @router.post("/chat/stream")
 async def stream_chat(req: ChatRequest):
     async def event_generator():
         full_response = ""
         start_time = time.time()
-        
+        resolved_parent_id = req.parent_id
+        if req.auto_branching:
+            resolved_parent_id = await choose_auto_parent_id(req)
+            logger.info(f"Auto branching picked parent_id={resolved_parent_id} for root_id={req.root_id}")
+
         # Build context from the parent chain
-        history = await get_history(req.parent_id) if req.parent_id else []
+        history = await get_history(resolved_parent_id) if resolved_parent_id else []
         history.append({"role": "user", "content": req.prompt})
 
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -173,7 +261,7 @@ async def stream_chat(req: ChatRequest):
                     
                     yield f"data: {json.dumps({'token': token, 'tps': 61.7})}\n\n"
         
-        p_ids = [req.parent_id] if req.parent_id and req.parent_id != "null" else []
+        p_ids = [resolved_parent_id] if resolved_parent_id and resolved_parent_id != "null" else []
         
         new_node = Node(
             parent_ids=p_ids,
@@ -181,7 +269,12 @@ async def stream_chat(req: ChatRequest):
             prompt=req.prompt,
             response=full_response,
             model_used=req.model,
-            metadata={"model": req.model, "tps": 61.7}
+            metadata={
+                "model": req.model,
+                "tps": 61.7,
+                "auto_branching": req.auto_branching,
+                "resolved_parent_id": resolved_parent_id,
+            },
         )
         
         # Use model_dump() for Pydantic v2 compatibility
@@ -200,7 +293,7 @@ async def stream_chat(req: ChatRequest):
                 upsert=True,
             )
 
-        yield f"data: {json.dumps({'type': 'node_saved', 'node_id': new_node.node_id})}\n\n"
+        yield f"data: {json.dumps({'type': 'node_saved', 'node_id': new_node.node_id, 'parent_id': resolved_parent_id})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -214,8 +307,101 @@ async def merge_nodes(req: MergeRequest):
     if not nodes:
         raise HTTPException(status_code=404, detail="Source nodes for merge not found")
 
-    context_str = "\n---\n".join([f"Branch: {n['response']}" for n in nodes])
-    prompt = f"Synthesize these branches into one cohesive summary:\n\n{context_str}"
+    if len(req.node_ids) != 2:
+        raise HTTPException(status_code=400, detail="Merge currently requires exactly 2 node_ids")
+
+    node_by_id = {n.get("node_id"): n for n in nodes}
+    missing_ids = [nid for nid in req.node_ids if nid not in node_by_id]
+    if missing_ids:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Source nodes not found: {', '.join(missing_ids)}",
+        )
+
+    ordered_nodes = [node_by_id[req.node_ids[0]], node_by_id[req.node_ids[1]]]
+    if len(ordered_nodes) != 2:
+        raise HTTPException(status_code=400, detail="Merge currently requires exactly 2 nodes")
+
+    # Preserve client intent: left is first selected node, right is second.
+    left = ordered_nodes[0]
+    right = ordered_nodes[1]
+    left_text = f"Prompt: {left.get('prompt', '')}\nResponse: {left.get('response', '')}"
+    right_text = f"Prompt: {right.get('prompt', '')}\nResponse: {right.get('response', '')}"
+
+    if not req.conflict_resolutions:
+        conflict_scan_prompt = (
+            "You are a merge-conflict detection agent for two chat branches.\n"
+            "Find direct semantic contradictions that cannot both be true.\n"
+            "Return ONLY strict JSON array with max 5 conflicts.\n"
+            'Each item schema: {"id":"c1","left_claim":"...","right_claim":"...","why_conflict":"..."}\n'
+            "Return [] if no conflicts.\n\n"
+            "LEFT CONTEXT:\n"
+            f"{left_text}\n\n"
+            "RIGHT CONTEXT:\n"
+            f"{right_text}\n"
+        )
+        conflicts = []
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                conflict_resp = await client.post(
+                    f"{OLLAMA_URL}/api/generate",
+                    json={"model": req.model, "prompt": conflict_scan_prompt, "stream": False},
+                )
+                conflict_resp.raise_for_status()
+                raw = conflict_resp.json().get("response", "[]")
+                parsed = json.loads(_extract_json_block(raw))
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if not isinstance(item, dict):
+                            continue
+                        left_claim = str(item.get("left_claim", "")).strip()
+                        right_claim = str(item.get("right_claim", "")).strip()
+                        why_conflict = str(item.get("why_conflict", "")).strip()
+                        if left_claim and right_claim:
+                            conflicts.append(
+                                {
+                                    "id": str(item.get("id", f"c{len(conflicts) + 1}")),
+                                    "left_claim": left_claim,
+                                    "right_claim": right_claim,
+                                    "why_conflict": why_conflict,
+                                }
+                            )
+        except Exception as e:
+            logger.warning(f"Conflict detection failed, continuing merge: {e}")
+
+        if conflicts:
+            return {
+                "requires_resolution": True,
+                "conflicts": conflicts,
+                "response": "",
+                "node_id": None,
+            }
+
+    resolution_context = ""
+    if req.conflict_resolutions:
+        resolution_lines = []
+        for res in req.conflict_resolutions:
+            choice = str(res.get("choice", "")).strip()
+            conflict_id = str(res.get("id", "")).strip()
+            custom = str(res.get("custom_resolution", "")).strip()
+            if conflict_id and choice:
+                line = f"- {conflict_id}: {choice}"
+                if custom:
+                    line += f" | custom: {custom}"
+                resolution_lines.append(line)
+        if resolution_lines:
+            resolution_context = "User-selected conflict resolutions:\n" + "\n".join(resolution_lines)
+
+    context_str = (
+        f"Left branch:\n{left_text}\n\n"
+        f"Right branch:\n{right_text}\n\n"
+        f"{resolution_context}"
+    )
+    prompt = (
+        "Synthesize these branches into one cohesive merged response.\n"
+        "If conflict resolutions are provided, strictly honor them.\n\n"
+        f"{context_str}"
+    )
     
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(f"{OLLAMA_URL}/api/generate", 
@@ -231,7 +417,10 @@ async def merge_nodes(req: MergeRequest):
     )
     
     await nodes_collection.insert_one(new_node.model_dump())
-    return new_node.model_dump() # Return the dict, not the object
+    payload = new_node.model_dump()
+    payload["requires_resolution"] = False
+    payload["conflicts"] = []
+    return payload
 
 # --- 7. ROOT MERGE (Cross-Project) ---
 @router.post("/merge/roots")

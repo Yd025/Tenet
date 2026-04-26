@@ -28,6 +28,7 @@ export interface StreamChatParams {
   parent_id: string | null;
   root_id: string;
   model: ModelId;
+  auto_branching?: boolean;
 }
 
 export interface StreamChunk {
@@ -36,12 +37,37 @@ export interface StreamChunk {
   node_id?: string;
 }
 
+export interface StreamResult {
+  nodeId: string | null;
+  parentId: string | null;
+}
+
+export interface MergeConflict {
+  id: string;
+  left_claim: string;
+  right_claim: string;
+  why_conflict?: string;
+}
+
+export interface MergeResolution {
+  id: string;
+  choice: 'left' | 'right' | 'custom';
+  custom_resolution?: string;
+}
+
+export interface MergeResult {
+  response: string;
+  node_id: string | null;
+  requires_resolution: boolean;
+  conflicts: MergeConflict[];
+}
+
 // POST /chat/stream — streams tokens via SSE, returns the backend node_id when done.
 export function streamChat(
   params: StreamChatParams,
   signal: AbortSignal,
   onChunk: (chunk: StreamChunk) => void,
-): Promise<string | null> {
+): Promise<StreamResult> {
   return fetch(`${API_BASE}/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -57,6 +83,7 @@ export function streamChat(
     const decoder = new TextDecoder();
     let buffer = '';
     let savedNodeId: string | null = null;
+    let savedParentId: string | null = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -75,6 +102,7 @@ export function streamChat(
           const parsed = JSON.parse(json);
           if (parsed.type === 'node_saved') {
             savedNodeId = parsed.node_id;
+            savedParentId = parsed.parent_id ?? null;
           } else {
             onChunk(parsed as StreamChunk);
           }
@@ -84,7 +112,7 @@ export function streamChat(
       }
     }
 
-    return savedNodeId;
+    return { nodeId: savedNodeId, parentId: savedParentId };
   });
 }
 
@@ -149,7 +177,8 @@ export async function fetchMerge(params: {
   node_id_b: string;
   root_id?: string;
   model?: string;
-}): Promise<{ response: string; node_id: string }> {
+  conflict_resolutions?: MergeResolution[];
+}): Promise<MergeResult> {
   const response = await fetch(`${API_BASE}/merge/nodes`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -157,6 +186,7 @@ export async function fetchMerge(params: {
       node_ids: [params.node_id_a, params.node_id_b],
       root_id: params.root_id ?? 'default',
       model: params.model ?? 'gemma4',
+      conflict_resolutions: params.conflict_resolutions ?? null,
     }),
   });
   return handleResponse(response);

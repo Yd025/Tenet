@@ -7,6 +7,7 @@ interface ConversationStore {
   activeConversationId: string | null;
   headNodeId: string | null;
   selectedNodeIds: string[];
+  autoBranchingEnabled: boolean;
 
   // actions
   loadNodes: (nodes: ConversationNode[]) => void;
@@ -17,6 +18,7 @@ interface ConversationStore {
     model: ModelId,
     isSensitive: boolean,
     backendNodeId?: string,
+    parentNodeId?: string | null,
   ) => void;
   checkoutNode: (nodeId: string) => void;
   branchFromNode: (nodeId: string, label: string) => string;
@@ -30,6 +32,7 @@ interface ConversationStore {
   selectNodeForMerge: (nodeId: string) => void;
   clearMergeSelection: () => void;
   setActiveConversation: (id: string | null) => void;
+  setAutoBranchingEnabled: (enabled: boolean) => void;
   getThreadToHead: () => ConversationNode[];
 }
 
@@ -52,6 +55,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
   activeConversationId: null,
   headNodeId: null,
   selectedNodeIds: [],
+  autoBranchingEnabled: false,
 
   // Load nodes fetched from the backend into the store.
   // Reconstructs children_ids from parent_ids since the backend doesn't store them.
@@ -116,6 +120,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     model: ModelId,
     isSensitive: boolean,
     backendNodeId?: string,
+    parentNodeId?: string | null,
   ) => {
     // Use the backend's node_id so the local store stays in sync with MongoDB
     const nodeId = backendNodeId ?? crypto.randomUUID();
@@ -124,20 +129,21 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     set((state) => {
       const { activeConversationId, headNodeId } = state;
       if (!activeConversationId) return {};
+      const effectiveParentId = parentNodeId === undefined ? headNodeId : parentNodeId;
 
       // If the parent already has children, this commit is a branch
       const parentHasChildren =
-        headNodeId != null &&
-        state.nodes[headNodeId] != null &&
-        state.nodes[headNodeId].children_ids.length > 0;
+        effectiveParentId != null &&
+        state.nodes[effectiveParentId] != null &&
+        state.nodes[effectiveParentId].children_ids.length > 0;
 
       const newNode: ConversationNode = {
         node_id: nodeId,
         conversation_id: activeConversationId,
         root_id: activeConversationId,
-        parent_id: headNodeId,
+        parent_id: effectiveParentId,
         merge_parent_id: null,
-        parent_ids: headNodeId ? [headNodeId] : [],
+        parent_ids: effectiveParentId ? [effectiveParentId] : [],
         children_ids: [],
         prompt,
         response,
@@ -152,10 +158,10 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
 
       const updatedNodes = { ...state.nodes, [nodeId]: newNode };
 
-      if (headNodeId && updatedNodes[headNodeId]) {
-        updatedNodes[headNodeId] = {
-          ...updatedNodes[headNodeId],
-          children_ids: [...updatedNodes[headNodeId].children_ids, nodeId],
+      if (effectiveParentId && updatedNodes[effectiveParentId]) {
+        updatedNodes[effectiveParentId] = {
+          ...updatedNodes[effectiveParentId],
+          children_ids: [...updatedNodes[effectiveParentId].children_ids, nodeId],
         };
       }
 
@@ -286,6 +292,10 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
 
   setActiveConversation: (id: string | null) => {
     set({ activeConversationId: id, nodes: {}, headNodeId: null, selectedNodeIds: [] });
+  },
+
+  setAutoBranchingEnabled: (enabled: boolean) => {
+    set({ autoBranchingEnabled: enabled });
   },
 
   getThreadToHead: (): ConversationNode[] => {

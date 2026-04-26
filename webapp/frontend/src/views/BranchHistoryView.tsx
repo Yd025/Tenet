@@ -6,6 +6,7 @@ import { select } from 'd3-selection';
 
 import { useConversationStore } from '../store/useConversationStore';
 import { fetchMerge } from '../api/client';
+import type { MergeConflict, MergeResolution } from '../api/client';
 import type { ConversationNode } from '../types';
 import ConversationNodeSVG from '../components/ConversationNode';
 import type { ConversationNodeData } from '../components/ConversationNode';
@@ -87,6 +88,9 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
   const ctxMenuRef = useRef<HTMLDivElement>(null);
   const [mergeLoading, setMergeLoading] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
+  const [pendingMergePair, setPendingMergePair] = useState<{ a: string; b: string } | null>(null);
+  const [mergeConflicts, setMergeConflicts] = useState<MergeConflict[]>([]);
+  const [conflictResolutions, setConflictResolutions] = useState<Record<string, MergeResolution>>({});
 
   useEffect(() => {
     if (!ctxMenu) return;
@@ -233,11 +237,57 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
     setMergeError(null);
     try {
       const result = await fetchMerge({ node_id_a: a, node_id_b: b, root_id: rootId, model: selectedModel });
-      // Use the node_id returned by the backend so the DB and store stay in sync
+      if (result.requires_resolution) {
+        const defaults: Record<string, MergeResolution> = {};
+        for (const c of result.conflicts) {
+          defaults[c.id] = { id: c.id, choice: 'left' };
+        }
+        setPendingMergePair({ a, b });
+        setMergeConflicts(result.conflicts);
+        setConflictResolutions(defaults);
+        return;
+      }
+      if (!result.node_id) {
+        throw new Error('Merge completed without node_id');
+      }
       mergeNodes(a, b, result.response, result.node_id);
     } catch (err) {
       console.error('Merge failed:', err);
       setMergeError('Merge failed — check console for details.');
+    } finally {
+      setMergeLoading(false);
+    }
+  }
+
+  async function handleResolveAndMerge() {
+    if (!pendingMergePair) return;
+    const rootId = activeConversationId ?? storeNodes[pendingMergePair.a]?.root_id ?? 'default';
+    const resolutions = Object.values(conflictResolutions);
+    if (resolutions.length !== mergeConflicts.length) {
+      setMergeError('Please resolve all conflicts before merging.');
+      return;
+    }
+
+    setMergeLoading(true);
+    setMergeError(null);
+    try {
+      const result = await fetchMerge({
+        node_id_a: pendingMergePair.a,
+        node_id_b: pendingMergePair.b,
+        root_id: rootId,
+        model: selectedModel,
+        conflict_resolutions: resolutions,
+      });
+      if (result.requires_resolution || !result.node_id) {
+        throw new Error('Merge still requires resolution.');
+      }
+      mergeNodes(pendingMergePair.a, pendingMergePair.b, result.response, result.node_id);
+      setPendingMergePair(null);
+      setMergeConflicts([]);
+      setConflictResolutions({});
+    } catch (err) {
+      console.error('Conflict-resolved merge failed:', err);
+      setMergeError('Conflict-resolved merge failed — check console for details.');
     } finally {
       setMergeLoading(false);
     }
@@ -355,6 +405,119 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
         <div className="absolute top-12 left-1/2 -translate-x-1/2 z-30 bg-red-900/80 border border-red-700/50 rounded px-4 py-2 text-xs text-red-300">
           {mergeError}
           <button className="ml-3 text-red-400 hover:text-white" onClick={() => setMergeError(null)}>✕</button>
+        </div>
+      )}
+
+      {/* Conflict resolver modal */}
+      {mergeConflicts.length > 0 && pendingMergePair && (
+        <div className="absolute inset-0 z-40 bg-black/60 flex items-center justify-center px-4">
+          <div className="w-full max-w-3xl max-h-[80vh] overflow-auto bg-tenet-surface border border-tenet-border rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-white">Resolve Merge Conflicts</h3>
+              <button
+                className="text-gray-400 hover:text-white"
+                onClick={() => {
+                  setPendingMergePair(null);
+                  setMergeConflicts([]);
+                  setConflictResolutions({});
+                }}
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-xs text-gray-400 mb-4">
+              Conflicting ideas were detected. Choose how each conflict should be resolved before merge.
+            </p>
+
+            <div className="space-y-3">
+              {mergeConflicts.map((conflict) => {
+                const resolution = conflictResolutions[conflict.id];
+                return (
+                  <div key={conflict.id} className="border border-tenet-border rounded-lg p-3 bg-black/20">
+                    <p className="text-xs text-gray-300 mb-2">{conflict.why_conflict || 'Potential contradiction detected.'}</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
+                      <div className="border border-teal-500/30 bg-teal-500/5 rounded-md p-2">
+                        <div className="text-[11px] uppercase tracking-wide text-teal-300 mb-1">Left</div>
+                        <div className="text-xs text-gray-100 leading-relaxed">{conflict.left_claim}</div>
+                      </div>
+                      <div className="border border-purple-500/30 bg-purple-500/5 rounded-md p-2">
+                        <div className="text-[11px] uppercase tracking-wide text-purple-300 mb-1">Right</div>
+                        <div className="text-xs text-gray-100 leading-relaxed">{conflict.right_claim}</div>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2 mb-2">
+                      <button
+                        className={`px-2 py-1 text-xs rounded border ${resolution?.choice === 'left' ? 'border-teal-400 text-teal-300' : 'border-tenet-border text-gray-300'}`}
+                        onClick={() => setConflictResolutions((prev) => ({ ...prev, [conflict.id]: { id: conflict.id, choice: 'left' } }))}
+                      >
+                        Keep Left
+                      </button>
+                      <button
+                        className={`px-2 py-1 text-xs rounded border ${resolution?.choice === 'right' ? 'border-purple-400 text-purple-300' : 'border-tenet-border text-gray-300'}`}
+                        onClick={() => setConflictResolutions((prev) => ({ ...prev, [conflict.id]: { id: conflict.id, choice: 'right' } }))}
+                      >
+                        Keep Right
+                      </button>
+                      <button
+                        className={`px-2 py-1 text-xs rounded border ${resolution?.choice === 'custom' ? 'border-amber-400 text-amber-300' : 'border-tenet-border text-gray-300'}`}
+                        onClick={() =>
+                          setConflictResolutions((prev) => ({
+                            ...prev,
+                            [conflict.id]: {
+                              id: conflict.id,
+                              choice: 'custom',
+                              custom_resolution: prev[conflict.id]?.custom_resolution ?? '',
+                            },
+                          }))
+                        }
+                      >
+                        Custom
+                      </button>
+                    </div>
+
+                    {resolution?.choice === 'custom' && (
+                      <textarea
+                        value={resolution.custom_resolution ?? ''}
+                        onChange={(e) =>
+                          setConflictResolutions((prev) => ({
+                            ...prev,
+                            [conflict.id]: {
+                              id: conflict.id,
+                              choice: 'custom',
+                              custom_resolution: e.target.value,
+                            },
+                          }))
+                        }
+                        className="w-full text-xs bg-black/30 border border-tenet-border rounded p-2 text-gray-100"
+                        placeholder="Describe your preferred merged truth for this conflict..."
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                className="px-3 py-1.5 text-xs rounded border border-tenet-border text-gray-300 hover:text-white"
+                onClick={() => {
+                  setPendingMergePair(null);
+                  setMergeConflicts([]);
+                  setConflictResolutions({});
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-3 py-1.5 text-xs rounded bg-tenet-teal text-black font-semibold hover:opacity-90 disabled:opacity-50"
+                onClick={handleResolveAndMerge}
+                disabled={mergeLoading}
+              >
+                {mergeLoading ? 'Merging…' : 'Resolve and Merge'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
