@@ -3,6 +3,7 @@ import { stratify, tree as d3Tree } from 'd3-hierarchy';
 import type { HierarchyPointNode } from 'd3-hierarchy';
 import { zoom as d3Zoom, zoomIdentity } from 'd3-zoom';
 import { select } from 'd3-selection';
+import 'd3-transition';
 
 import { useConversationStore } from '../store/useConversationStore';
 import { fetchMerge } from '../api/client';
@@ -328,10 +329,13 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
     const svgH = svgRect.height || 600;
     const scale = 1.5;
 
-    select(svg).call(
-      zoomBehavior.transform,
-      zoomIdentity.translate(svgW / 2 - target.x * scale, svgH / 2 - target.y * scale).scale(scale),
-    );
+    select(svg)
+      .transition()
+      .duration(500)
+      .call(
+        zoomBehavior.transform,
+        zoomIdentity.translate(svgW / 2 - target.x * scale, svgH / 2 - target.y * scale).scale(scale),
+      );
   }, [layoutNodes]);
 
   const nodeCount = Object.values(storeNodes).filter((n) => !n.pruned).length;
