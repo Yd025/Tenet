@@ -5,6 +5,7 @@ export interface ConversationNodeData {
   isBranch: boolean;
   isMerge: boolean;
   isSelected: boolean;
+  isBookmarked: boolean;
   nodeId: string;
   onCheckout: (id: string) => void;
   onBranch: (id: string) => void;
@@ -14,6 +15,7 @@ export interface ConversationNodeData {
   onHoverStart: (id: string, event: React.MouseEvent) => void;
   onHoverMove: (id: string, event: React.MouseEvent) => void;
   onHoverEnd: () => void;
+  onDoubleClick: (id: string) => void;
 }
 
 interface ConversationNodeSVGProps {
@@ -32,8 +34,11 @@ export default function ConversationNodeSVG({
   onContextMenu,
 }: ConversationNodeSVGProps) {
   function handleClick() {
-    data.onCheckout(data.nodeId);
     data.onSelect(data.nodeId);
+  }
+
+  function handleDblClick() {
+    data.onDoubleClick(data.nodeId);
   }
 
   function handleCtx(e: React.MouseEvent) {
@@ -57,6 +62,7 @@ export default function ConversationNodeSVG({
     <g
       transform={`translate(${x},${y})`}
       onClick={handleClick}
+      onDoubleClick={handleDblClick}
       onContextMenu={handleCtx}
       onMouseEnter={(e) => data.onHoverStart(data.nodeId, e)}
       onMouseMove={(e) => data.onHoverMove(data.nodeId, e)}
@@ -101,6 +107,15 @@ export default function ConversationNodeSVG({
         fill={fill}
         filter={data.isHead ? `url(#glow-${data.nodeId})` : undefined}
       />
+
+      {/* Bookmark indicator */}
+      {data.isBookmarked && (
+        <path
+          d="M-2,-7 L4,-7 L4,-1 L1,-3 L-2,-1 Z"
+          fill="#f59e0b"
+          transform={`translate(${-NODE_RADIUS - 1}, ${-NODE_RADIUS + 2})`}
+        />
+      )}
 
       {/* Head indicator ring */}
       {data.isHead && (
