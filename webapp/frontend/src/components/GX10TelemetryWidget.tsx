@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { fetchTelemetry } from '../api/client';
+import { fetchAgentTelemetry } from '../api/client';
 import { useThemeStore } from '../store/useThemeStore';
 import { useConversationStore } from '../store/useConversationStore';
 import type { TelemetryStats } from '../types/index';
@@ -13,7 +13,7 @@ export default function GX10TelemetryWidget() {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const data = await fetchTelemetry();
+        const data = await fetchAgentTelemetry();
         setStats(data);
         setIsOnline(true);
       } catch {
@@ -84,6 +84,15 @@ export default function GX10TelemetryWidget() {
 
       <StatRow label="GPU CLOCK" value={stats.gpu_clock_mhz != null ? `${stats.gpu_clock_mhz} MHz` : 'N/A'} pct={stats.gpu_clock_mhz != null ? Math.min(100, stats.gpu_clock_mhz / 3000 * 100) : 0} teal={teal} labelCls={labelCls} valueCls={valueCls} trackCls={trackCls} />
 
+      {stats.vram_gb != null && (
+        <StatRow
+          label="VRAM USED"
+          value={stats.vram_total_gb != null ? `${stats.vram_gb} / ${stats.vram_total_gb} GB` : `${stats.vram_gb} GB`}
+          pct={stats.vram_total_gb ? Math.min(100, stats.vram_gb / stats.vram_total_gb * 100) : 0}
+          teal={teal} labelCls={labelCls} valueCls={valueCls} trackCls={trackCls}
+        />
+      )}
+
       <div className="mt-2">
         <div className={`text-xs uppercase tracking-wider mb-1 ${labelCls}`}>TOKENS / SEC</div>
         <div className="text-xl font-bold font-mono" style={{ color: teal }}>
@@ -95,6 +104,25 @@ export default function GX10TelemetryWidget() {
         <span className={`text-xs ${labelCls}`}>Active Nodes</span>
         <span className="text-xs font-mono" style={{ color: teal }}>{stats.active_nodes}</span>
       </div>
+
+      {/* Loaded models */}
+      {stats.loaded_models && stats.loaded_models.length > 0 && (
+        <div className={`mt-2 pt-2 border-t ${borderCls}`}>
+          <span className={`text-xs uppercase tracking-wider ${labelCls}`}>Loaded Models</span>
+          {stats.loaded_models.map((m) => (
+            <div key={m} className="text-xs font-mono truncate mt-0.5" style={{ color: teal }}>{m}</div>
+          ))}
+        </div>
+      )}
+
+      {/* Alerts */}
+      {stats.alerts && stats.alerts.length > 0 && (
+        <div className="mt-2 space-y-1">
+          {stats.alerts.map((alert) => (
+            <div key={alert} className="text-xs text-amber-400 truncate">⚠ {alert}</div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

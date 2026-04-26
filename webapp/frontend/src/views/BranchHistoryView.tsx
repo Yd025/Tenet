@@ -31,6 +31,8 @@ function buildTreeData(storeNodes: Record<string, ConversationNode>): TreeDatum[
   const active = Object.values(storeNodes).filter((n) => !n.pruned);
   return active.map((n) => ({
     id: n.node_id,
+    // For merge nodes, use the first parent for layout placement — the other
+    // parent edges are drawn separately as mergeEdges
     parentId: n.parent_id,
     node: n,
   }));
@@ -41,8 +43,6 @@ function buildLabels(storeNodes: Record<string, ConversationNode>) {
     .filter((n) => !n.pruned)
     .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-  let trunkCount = 0;
-  let branchCount = 0;
   const labelMap: Record<string, string> = {};
   const sublabelMap: Record<string, string> = {};
 
@@ -51,26 +51,9 @@ function buildLabels(storeNodes: Record<string, ConversationNode>) {
     const promptSnippet = (node.prompt || '').trim().split(/\s+/).slice(0, 5).join(' ');
     const responseSnippet = (node.response || '').trim().split(/\s+/).slice(0, 12).join(' ');
 
-    if (node.is_merge_node) {
-      trunkCount += 1;
-      const prefix = `v${trunkCount}`;
-      const summary = (metadata.summary_title as string) || 'Merge Synthesis';
-      labelMap[node.node_id] = `${prefix}: ${summary}`;
-      sublabelMap[node.node_id] = (metadata.summary_subtitle as string) || promptSnippet || '';
-    } else if (node.branch_label) {
-      branchCount += 1;
-      const parentLabel = node.parent_id ? (labelMap[node.parent_id]?.split(':')[0] ?? '?') : '?';
-      const prefix = `b${branchCount}/${parentLabel}`;
-      const summary = (metadata.summary_title as string) || promptSnippet || node.branch_label;
-      labelMap[node.node_id] = `${prefix}: ${summary}`;
-      sublabelMap[node.node_id] = (metadata.summary_subtitle as string) || responseSnippet || '';
-    } else {
-      trunkCount += 1;
-      const prefix = `v${trunkCount}`;
-      const summary = (metadata.summary_title as string) || promptSnippet || 'Node';
-      labelMap[node.node_id] = `${prefix}: ${summary}`;
-      sublabelMap[node.node_id] = (metadata.summary_subtitle as string) || responseSnippet || '';
-    }
+    labelMap[node.node_id] = (metadata.summary_title as string) || promptSnippet || 'Node';
+
+    sublabelMap[node.node_id] = (metadata.summary_subtitle as string) || responseSnippet || '';
   }
 
   return { labelMap, sublabelMap };
@@ -94,6 +77,16 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
   const clearMergeSelection = useConversationStore((s) => s.clearMergeSelection);
   const isDark = useThemeStore((s) => s.isDark);
 
+  // Stable key that only changes when node topology changes — not on metadata/selection updates.
+  // This prevents the D3 layout from recomputing on every summary load or node hover.
+  const structureKey = useMemo(() => {
+    return Object.values(storeNodes)
+      .filter((n) => !n.pruned)
+      .map((n) => `${n.node_id}:${n.parent_id ?? ''}:${(n.parent_ids ?? []).join(',')}`)
+      .sort()
+      .join('|');
+  }, [storeNodes]);
+
   const svgRef = useRef<SVGSVGElement>(null);
   const gRef = useRef<SVGGElement>(null);
 
@@ -101,13 +94,14 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
   const ctxMenuRef = useRef<HTMLDivElement>(null);
   const [mergeLoading, setMergeLoading] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
-  const [pendingMergePair, setPendingMergePair] = useState<{ a: string; b: string } | null>(null);
+  const [pendingMergePair, setPendingMergePair] = useState<{ ids: string[] } | null>(null);
   const [mergeConflicts, setMergeConflicts] = useState<MergeConflict[]>([]);
   const [conflictResolutions, setConflictResolutions] = useState<Record<string, MergeResolution>>({});
   const [mergeMode, setMergeMode] = useState(false);
   const [bookmarkedNodeIds, setBookmarkedNodeIds] = useState<Set<string>>(new Set());
   const [bookmarksExpanded, setBookmarksExpanded] = useState(true);
   const [hoverPreview, setHoverPreview] = useState<{ nodeId: string; x: number; y: number } | null>(null);
+  const [integrityResult, setIntegrityResult] = useState<{ valid: boolean; message: string } | null>(null);
 
   const toggleBookmark = useCallback((nodeId: string) => {
     setBookmarkedNodeIds((prev) => {
@@ -160,8 +154,28 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
     if (!activeConversationId) return;
     const activeNodes = Object.values(storeNodes).filter((n) => !n.pruned);
     if (activeNodes.length === 0) return;
+
+    // On first load, clear summary_failed so nodes get another attempt
+    const failedIds = activeNodes
+      .filter((n) => n.metadata?.summary_failed)
+      .map((n) => n.node_id);
+    if (failedIds.length > 0) {
+      useConversationStore.setState((state) => {
+        const nextNodes = { ...state.nodes };
+        for (const nid of failedIds) {
+          if (nextNodes[nid]) {
+            nextNodes[nid] = {
+              ...nextNodes[nid],
+              metadata: { ...(nextNodes[nid].metadata ?? {}), summary_failed: false },
+            };
+          }
+        }
+        return { nodes: nextNodes };
+      });
+    }
+
     const missingIds = activeNodes
-      .filter((n) => !(n.metadata?.summary_title && n.metadata?.summary_subtitle))
+      .filter((n) => !(n.metadata?.summary_title && n.metadata?.summary_subtitle) && !n.metadata?.summary_failed)
       .map((n) => n.node_id);
     if (missingIds.length === 0) return;
 
@@ -186,6 +200,7 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
                 ...(existing.metadata ?? {}),
                 summary_title: summary.title,
                 summary_subtitle: summary.subtitle,
+                summary_failed: false,
               },
             };
           }
@@ -196,11 +211,16 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
       }
     }
 
+    // First attempt immediately, then retry once after 8s for any that timed out
     hydrateSummaries();
+    const retryTimer = setTimeout(() => {
+      if (!isCancelled) hydrateSummaries();
+    }, 8000);
     return () => {
       isCancelled = true;
+      clearTimeout(retryTimer);
     };
-  }, [activeConversationId, storeNodes, selectedModel]);
+  }, [activeConversationId, selectedModel]);
 
   const { layoutNodes, mergeEdges } = useMemo(() => {
     const treeData = buildTreeData(storeNodes);
@@ -240,14 +260,19 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
     const nodeById = new Map(nodes.map((n) => [n.data.id, n]));
     const mEdges: { source: HierarchyPointNode<TreeDatum>; target: HierarchyPointNode<TreeDatum> }[] = [];
     for (const n of nodes) {
-      const mergeParentId = n.data.node.merge_parent_id;
-      if (mergeParentId && nodeById.has(mergeParentId)) {
-        mEdges.push({ source: nodeById.get(mergeParentId)!, target: n });
+      if (!n.data.node.is_merge_node) continue;
+      const allParentIds = n.data.node.parent_ids ?? [];
+      const primaryParentId = n.data.node.parent_id;
+      for (const pid of allParentIds) {
+        if (pid === primaryParentId) continue;
+        if (nodeById.has(pid)) {
+          mEdges.push({ source: nodeById.get(pid)!, target: n });
+        }
       }
     }
 
     return { layoutNodes: nodes, mergeEdges: mEdges };
-  }, [storeNodes]);
+  }, [structureKey]);
 
   const { labelMap, sublabelMap } = useMemo(() => buildLabels(storeNodes), [storeNodes]);
 
@@ -329,13 +354,13 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
         for (const c of result.conflicts) {
           defaults[c.id] = { id: c.id, choice: 'left' };
         }
-        setPendingMergePair({ a: selectedNodeIds[0], b: selectedNodeIds[1] });
+        setPendingMergePair({ ids: [...selectedNodeIds] });
         setMergeConflicts(result.conflicts);
         setConflictResolutions(defaults);
         return;
       }
       if (!result.node_id) throw new Error('Merge completed without node_id');
-      mergeNodes(selectedNodeIds[0], selectedNodeIds[1], result.response, result.node_id);
+      mergeNodes(selectedNodeIds, result.response, result.node_id);
       clearMergeSelection();
       setMergeMode(false);
     } catch (err) {
@@ -348,14 +373,14 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
 
   async function handleResolveAndMerge() {
     if (!pendingMergePair) return;
-    const rootId = activeConversationId ?? storeNodes[pendingMergePair.a]?.root_id ?? 'default';
+    const rootId = activeConversationId ?? storeNodes[pendingMergePair.ids[0]]?.root_id ?? 'default';
     const resolutions = Object.values(conflictResolutions);
 
     setMergeLoading(true);
     setMergeError(null);
     try {
       const result = await fetchMerge({
-        node_ids: [pendingMergePair.a, pendingMergePair.b],
+        node_ids: pendingMergePair.ids,
         root_id: rootId,
         model: selectedModel,
         conflict_resolutions: resolutions,
@@ -363,10 +388,11 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
       if (result.requires_resolution || !result.node_id) {
         throw new Error('Merge still requires resolution.');
       }
-      mergeNodes(pendingMergePair.a, pendingMergePair.b, result.response, result.node_id);
+      mergeNodes(pendingMergePair.ids, result.response, result.node_id);
       setPendingMergePair(null);
       setMergeConflicts([]);
       setConflictResolutions({});
+      setMergeMode(false);
     } catch (err) {
       console.error('Conflict-resolved merge failed:', err);
       setMergeError('Conflict-resolved merge failed — check console for details.');
@@ -380,6 +406,50 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
     branchFromNode(selectedNodeIds[0], 'New Branch');
     clearMergeSelection();
     setActiveTab('chats');
+  }
+
+  async function handleExport(format: 'json' | 'markdown' | 'csv' | 'html') {
+    if (!activeConversationId) return;
+    setExportLoading(true);
+    try {
+      const result = await exportConversation(activeConversationId, format);
+      if (format === 'json') {
+        const { data } = result as { data: string; items_exported: number };
+        const blob = new Blob([data], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${activeConversationId}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } else {
+        const mimeMap = { markdown: 'text/markdown', csv: 'text/csv', html: 'text/html' };
+        const extMap = { markdown: 'md', csv: 'csv', html: 'html' };
+        const blob = result as Blob;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${activeConversationId}.${extMap[format]}`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+    } catch (err) {
+      console.error('Export failed:', err);
+    } finally {
+      setExportLoading(false);
+    }
+  }
+
+  async function handleCheckIntegrity() {
+    if (!activeConversationId) return;
+    try {
+      const result = await checkGraphIntegrity(activeConversationId);
+      setIntegrityResult({ valid: result.valid, message: result.message });
+      setTimeout(() => setIntegrityResult(null), 4000);
+    } catch {
+      setIntegrityResult({ valid: false, message: 'Integrity check failed' });
+      setTimeout(() => setIntegrityResult(null), 4000);
+    }
   }
 
   const panToNode = useCallback((nodeId: string) => {

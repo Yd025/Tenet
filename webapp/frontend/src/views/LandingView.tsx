@@ -22,8 +22,7 @@ export default function LandingView() {
 
   const handleSubmit = () => {
     if (!inputValue.trim()) return;
-    startConversation(inputValue.trim());
-    const newId = useConversationStore.getState().activeConversationId;
+    const newId = startConversation(inputValue.trim());
     navigate(`/c/${newId}`);
   };
 

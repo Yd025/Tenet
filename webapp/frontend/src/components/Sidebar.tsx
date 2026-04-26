@@ -35,10 +35,10 @@ export default function Sidebar({ onClose }: SidebarProps) {
       .catch(() => {});
   };
 
-  // Initial load and reload when switching conversations
+  // Load once on mount
   useEffect(() => {
     loadConversations();
-  }, [activeConversationId]);
+  }, []);
 
   useEffect(() => {
     if (!activeConversationId || !lastMessageAt) return;
@@ -50,27 +50,25 @@ export default function Sidebar({ onClose }: SidebarProps) {
       const [item] = updated.splice(idx, 1);
       return [item, ...updated];
     });
-    // Re-fetch after stream completes (backend updates last_active_at)
-    const id = setTimeout(loadConversations, 2000);
-    return () => clearTimeout(id);
   }, [lastMessageAt]);
 
-  const handleDelete = async (rootId: string, e: React.MouseEvent) => {
+  const handleDelete = async (rootId: string, e: React.MouseEvent, isLocalOnly = false) => {
     e.stopPropagation();
     if (!confirm('Delete this conversation and all its nodes?')) return;
     setDeletingId(rootId);
     try {
-      await deleteConversation(rootId);
+      if (!isLocalOnly) {
+        await deleteConversation(rootId);
+      }
       const remaining = dbConversations.filter((c) => c.root_id !== rootId);
       setDbConversations(remaining);
+      useConversationStore.getState().deleteLocalConversation(rootId);
       if (activeConversationId === rootId) {
         setActiveConversation(null);
-        // Navigate to the next most recent conversation, not the landing page
         const next = remaining[0];
         if (next) {
           navigate(`/c/${next.root_id}`);
         }
-        // If no conversations left, just stay — AppShell will show empty state
       }
     } catch {
       alert('Failed to delete conversation.');
@@ -79,8 +77,9 @@ export default function Sidebar({ onClose }: SidebarProps) {
     }
   };
 
-  const localIds = new Set(conversations.map((c) => c.id));
-  const dbOnlyConvs = dbConversations.filter((c) => !localIds.has(c.root_id));
+  // Only show local conversations that don't exist in the DB yet
+  const dbIds = new Set(dbConversations.map((c) => c.root_id));
+  const localOnlyConvs = conversations.filter((c) => !dbIds.has(c.id));
 
   const surface = isDark ? 'bg-[#111114] border-[#1e1e24]' : 'bg-white border-gray-200';
   const textMuted = isDark ? 'text-gray-500' : 'text-gray-600';
@@ -125,8 +124,8 @@ export default function Sidebar({ onClose }: SidebarProps) {
 
       {/* Conversation list — sorted by time */}
       <div className="flex-1 overflow-y-auto">
-        {/* Local (unsaved) conversations */}
-        {conversations.map((conv) => {
+        {/* Local-only (not yet in DB) conversations */}
+        {localOnlyConvs.map((conv) => {
           const isActive = conv.id === activeConversationId;
           return (
             <div key={conv.id} className="group flex items-center">
@@ -140,7 +139,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
                 <span className="truncate">{conv.title}</span>
               </button>
               <button
-                onClick={(e) => handleDelete(conv.id, e)}
+                onClick={(e) => handleDelete(conv.id, e, true)}
                 disabled={deletingId === conv.id}
                 className={`opacity-0 group-hover:opacity-100 mr-2 p-1 rounded transition-all ${
                   isDark ? 'text-gray-600 hover:text-red-400' : 'text-gray-400 hover:text-red-500'
@@ -154,7 +153,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
         })}
 
         {/* DB conversations */}
-        {dbOnlyConvs.map((conv) => {
+        {dbConversations.map((conv) => {
           const isActive = conv.root_id === activeConversationId;
           return (
             <div key={conv.root_id} className="group flex items-center">

@@ -107,8 +107,6 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
       backendParentId = streamResult.parentId;
 
       if (lastChunkTps > 0) setLastTps(lastChunkTps);
-      backendNodeId = streamResult.nodeId;
-      backendParentId = streamResult.parentId;
 
       // Use the backend's node_id so parent_id on the next message matches MongoDB
       commitMessage(

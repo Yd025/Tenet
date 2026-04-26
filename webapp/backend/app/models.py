@@ -50,3 +50,9 @@ class UpdateConversationRequest(BaseModel):
 
 class BulkDeleteRequest(BaseModel):
     node_ids: List[str]
+
+
+class ExportRequest(BaseModel):
+    root_id: str
+    format: str = "json"  # json | markdown | csv | html
+    include_metadata: bool = False

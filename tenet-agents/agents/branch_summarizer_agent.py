@@ -1,13 +1,28 @@
+"""
+Branch Summarizer Agent — summarizes conversations and nodes using
+live data from the webapp REST API (MongoDB-backed).
+
+For node-level summaries it delegates to the webapp's /nodes/summaries
+endpoint which already calls Ollama, so we avoid duplicating that logic.
+"""
+import os
+
+import httpx
 from uagents import Agent, Context
 from protocols.summary_protocol import (
-    SummaryRequest, SummaryResponse, summary_protocol, SummaryTarget
+    SummaryRequest, SummaryResponse, summary_protocol, SummaryTarget,
 )
 from config.agent_config import AgentConfig
-from utils.local_runtime import dag_store
+from utils.webapp_dag_store import WebappDagStore
+
+WEBAPP_API = os.getenv("WEBAPP_API_URL", "http://127.0.0.1:8000/api")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+_TIMEOUT = 60.0
+
 
 class TenetBranchSummarizer:
-    """Summarizes branches and conversations"""
-    
+    """Summarizes conversations and nodes using live webapp data."""
+
     def __init__(self):
         self.config = AgentConfig()
         self.agent = Agent(
@@ -17,17 +32,14 @@ class TenetBranchSummarizer:
             mailbox=True,
             publish_agent_details=True,
         )
+        self.dag_store = WebappDagStore()
         self.setup_handlers()
 
     def setup_handlers(self):
-        """Setup summarization handlers"""
         @summary_protocol.on_message(model=SummaryRequest)
         async def handle_summary_request(ctx: Context, sender: str, msg: SummaryRequest):
-            """Handle summarization requests"""
             try:
-                if msg.target_type == SummaryTarget.BRANCH:
-                    response = await self.summarize_branch(msg)
-                elif msg.target_type == SummaryTarget.CONVERSATION:
+                if msg.target_type == SummaryTarget.CONVERSATION:
                     response = await self.summarize_conversation(msg)
                 elif msg.target_type == SummaryTarget.NODE:
                     response = await self.summarize_node(msg)
@@ -37,158 +49,128 @@ class TenetBranchSummarizer:
                         "summary": "",
                         "key_points": [],
                         "statistics": {},
-                        "message": f"Unknown target type: {msg.target_type}"
+                        "message": f"Unsupported target type: {msg.target_type}",
                     }
                 await ctx.send(sender, SummaryResponse(**response))
             except Exception as e:
-                error_response = {
-                    "success": False,
-                    "summary": "",
-                    "key_points": [],
-                    "statistics": {},
-                    "message": f"Summarization failed: {str(e)}"
-                }
-                await ctx.send(sender, SummaryResponse(**error_response))
-
-    async def summarize_branch(self, msg: SummaryRequest) -> dict:
-        """Summarize a branch"""
-        try:
-            branch_data = dag_store.get_branch(msg.target_id) or {}
-            content = self.extract_branch_content(branch_data)
-            summary_data = self.generate_summary(content, msg.summary_length)
-            stats = self.calculate_statistics(content, summary_data["summary"])
-            
-            return {
-                "success": True,
-                "summary": summary_data["summary"],
-                "key_points": summary_data["key_points"],
-                "statistics": stats,
-                "message": f"Branch '{branch_data.get('branch_name', 'Unknown')}' summarized successfully"
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "summary": "",
-                "key_points": [],
-                "statistics": {},
-                "message": f"Failed to summarize branch: {str(e)}"
-            }
+                await ctx.send(sender, SummaryResponse(
+                    success=False, summary="", key_points=[], statistics={},
+                    message=f"Summarization failed: {e}",
+                ))
 
     async def summarize_conversation(self, msg: SummaryRequest) -> dict:
-        """Summarize an entire conversation"""
+        """
+        Fetch all nodes for a conversation and ask Ollama to summarize the
+        full thread.  Falls back to a text-extraction summary if Ollama fails.
+        """
+        nodes = self.dag_store.list_nodes(msg.target_id)
+        if not nodes:
+            return {
+                "success": False, "summary": "", "key_points": [], "statistics": {},
+                "message": "No nodes found for conversation",
+            }
+
+        # Build a readable transcript (trunk order by timestamp)
+        nodes_sorted = sorted(nodes, key=lambda n: n.get("timestamp", ""))
+        lines = []
+        for n in nodes_sorted:
+            if n.get("prompt") and n["prompt"] not in ("⎇ Merge Synthesis",):
+                lines.append(f"User: {n['prompt']}")
+            if n.get("response"):
+                lines.append(f"AI: {n['response']}")
+        transcript = "\n".join(lines)
+
+        summary_prompt = (
+            "Summarize this AI conversation concisely.\n"
+            "Return strict JSON only with keys: summary (2-4 sentences), key_points (list of up to 5 strings).\n\n"
+            f"{transcript[:6000]}"
+        )
+
+        summary_text = ""
+        key_points: list[str] = []
         try:
-            conversation_data = dag_store.get_graph(msg.target_id, include_pruned=False)
-            branches = []
-            for branch in conversation_data.get("branches", []):
-                payload = dag_store.get_branch(branch["branch_id"]) or branch
-                branches.append(payload)
-            conversation_data["branches"] = branches
-            content = self.extract_conversation_content(conversation_data)
-            summary_data = self.generate_summary(content, msg.summary_length)
-            stats = self.calculate_statistics(content, summary_data["summary"])
-            
-            return {
-                "success": True,
-                "summary": summary_data["summary"],
-                "key_points": summary_data["key_points"],
-                "statistics": stats,
-                "message": f"Conversation summarized successfully"
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "summary": "",
-                "key_points": [],
-                "statistics": {},
-                "message": f"Failed to summarize conversation: {str(e)}"
-            }
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{OLLAMA_URL}/api/generate",
+                    json={"model": self.config.DEFAULT_LOCAL_MODEL, "prompt": summary_prompt, "stream": False},
+                )
+                resp.raise_for_status()
+                import json
+                raw = resp.json().get("response", "")
+                # strip markdown fences if present
+                raw = raw.strip()
+                if raw.startswith("```"):
+                    parts = raw.split("```")
+                    for p in parts:
+                        p = p.strip()
+                        if p.startswith("json"):
+                            raw = p[4:].strip()
+                            break
+                        if p.startswith("{"):
+                            raw = p
+                            break
+                parsed = json.loads(raw)
+                summary_text = str(parsed.get("summary", "")).strip()
+                key_points = [str(k) for k in parsed.get("key_points", []) if k]
+        except Exception:
+            # Fallback: first few lines of transcript
+            summary_text = "\n".join(lines[:6]) if lines else "No content."
+
+        stats = {
+            "total_nodes": len(nodes),
+            "total_tokens": len(transcript.split()),
+            "summary_tokens": len(summary_text.split()),
+        }
+        return {
+            "success": True,
+            "summary": summary_text,
+            "key_points": key_points[:5],
+            "statistics": stats,
+            "message": f"Conversation summarized ({len(nodes)} nodes)",
+        }
 
     async def summarize_node(self, msg: SummaryRequest) -> dict:
-        """Summarize a single node"""
+        """
+        Delegate to the webapp's /nodes/summaries endpoint so we reuse the
+        same Ollama call and the result gets persisted to MongoDB.
+        """
         try:
-            node_data = dag_store.get_node(msg.target_id) or {}
-            content = f"Prompt: {node_data.get('prompt', '')}\nResponse: {node_data.get('response', '')}"
-            summary_data = self.generate_summary(content, "short")
-            
-            return {
-                "success": True,
-                "summary": summary_data["summary"],
-                "key_points": summary_data["key_points"],
-                "statistics": {
-                    "total_nodes": 1,
-                    "total_tokens": len(content.split()),
-                    "summary_tokens": len(summary_data["summary"].split()),
-                    "compression_ratio": len(content.split()) / len(summary_data["summary"].split())
-                },
-                "message": "Node summarized successfully"
-            }
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{WEBAPP_API}/nodes/summaries",
+                    json={
+                        "root_id": msg.target_id,  # target_id is node_id here
+                        "node_ids": [msg.target_id],
+                        "model": self.config.DEFAULT_LOCAL_MODEL,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                summaries = data.get("summaries", [])
+                if summaries:
+                    s = summaries[0]
+                    return {
+                        "success": True,
+                        "summary": f"{s.get('title', '')} — {s.get('subtitle', '')}",
+                        "key_points": [s.get("title", ""), s.get("subtitle", "")],
+                        "statistics": {"total_nodes": 1},
+                        "message": "Node summarized via webapp",
+                    }
         except Exception as e:
-            return {
-                "success": False,
-                "summary": "",
-                "key_points": [],
-                "statistics": {},
-                "message": f"Failed to summarize node: {str(e)}"
-            }
+            pass
 
-    def extract_branch_content(self, branch_data: dict) -> str:
-        """Extract content from branch data"""
-        content_parts = []
-        for node in branch_data.get("nodes", []):
-            content_parts.append(f"User: {node.get('prompt', '')}")
-            content_parts.append(f"AI: {node.get('response', '')}")
-        return "\n".join(content_parts)
-
-    def extract_conversation_content(self, conversation_data: dict) -> str:
-        """Extract content from entire conversation"""
-        content_parts = []
-        for branch in conversation_data.get("branches", []):
-            content_parts.append(f"=== Branch: {branch.get('branch_name', 'Unknown')} ===")
-            content_parts.append(self.extract_branch_content(branch))
-        return "\n".join(content_parts)
-
-    def generate_summary(self, content: str, length: str) -> dict:
-        """Generate AI summary of content"""
-        sentences = [line.strip() for line in content.split("\n") if line.strip()]
-        if length == "short":
-            picked = sentences[:3]
-        elif length == "long":
-            picked = sentences[:12]
-        else:
-            picked = sentences[:6]
-        summary_text = "\n".join(picked) if picked else "No content available for summary."
-        return {"summary": summary_text, "key_points": self.extract_key_points(summary_text)}
-
-    def extract_key_points(self, summary: str) -> list:
-        """Extract key points from summary"""
-        key_points = []
-        lines = summary.split('\n')
-        for line in lines:
-            line = line.strip()
-            if line.startswith(('-', '•', '*')) or (line and line[0].isdigit() and line[1] in '. '):
-                key_points.append(line.lstrip('-•*0123456789. '))
-        return key_points[:5]
-
-    def calculate_statistics(self, original_content: str, summary: str) -> dict:
-        """Calculate summary statistics"""
-        original_tokens = len(original_content.split())
-        summary_tokens = len(summary.split())
         return {
-            "total_nodes": original_content.count("User:"),
-            "total_tokens": original_tokens,
-            "summary_tokens": summary_tokens,
-            "compression_ratio": original_tokens / summary_tokens if summary_tokens > 0 else 0
+            "success": False, "summary": "", "key_points": [], "statistics": {},
+            "message": "Node summary failed",
         }
 
     def run(self):
-        """Start the branch summarizer agent"""
         self.agent.include(summary_protocol)
-        print("📝 Tenet Branch Summarizer Agent starting...")
+        print("📝 Tenet Branch Summarizer Agent starting (webapp-backed)...")
         print(f"📍 Agent Address: {self.agent.address}")
-        print(f"🔗 Summary Protocol: Enabled")
-        print("✨ Summary types: branch, conversation, node")
+        print("🔗 Summary Protocol: Enabled")
         self.agent.run()
 
+
 if __name__ == "__main__":
-    summarizer = TenetBranchSummarizer()
-    summarizer.run()
+    TenetBranchSummarizer().run()

@@ -133,7 +133,8 @@ export async function fetchMergeNodes(params: {
   node_ids: string[];
   root_id: string;
   model: ModelId;
-}): Promise<{ node_id: string; response: string }> {
+  conflict_resolutions?: MergeResolution[];
+}): Promise<MergeResult> {
   const response = await fetch(`${API_BASE}/merge/nodes`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -303,4 +304,44 @@ export async function fetchNodeSummaries(params: {
     }),
   });
   return handleResponse(response);
+}
+
+// ---------------------------------------------------------------------------
+// Agent-integrated endpoints
+// ---------------------------------------------------------------------------
+
+// GET /api/agent-telemetry — GPU stats + loaded Ollama models
+export async function fetchAgentTelemetry(): Promise<import('../types').TelemetryStats> {
+  const response = await fetch(`${API_BASE}/agent-telemetry`);
+  if (!response.ok) return { active_nodes: 0 };
+  return response.json();
+}
+
+// GET /api/graph-integrity/:root_id — DAG validation
+export async function checkGraphIntegrity(
+  rootId: string,
+  includePruned = false,
+): Promise<import('../types').GraphIntegrityResult> {
+  const response = await fetch(
+    `${API_BASE}/graph-integrity/${encodeURIComponent(rootId)}?include_pruned=${includePruned}`,
+  );
+  return handleResponse(response);
+}
+
+// POST /api/export — download conversation in chosen format
+// For json format returns { format, items_exported, data }
+// For markdown/csv/html returns a Blob for download
+export async function exportConversation(
+  rootId: string,
+  format: import('../types').ExportFormat,
+  includeMetadata = false,
+): Promise<{ data: string; items_exported: number } | Blob> {
+  const response = await fetch(`${API_BASE}/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ root_id: rootId, format, include_metadata: includeMetadata }),
+  });
+  if (!response.ok) throw new Error(`Export failed: ${response.status}`);
+  if (format === 'json') return response.json();
+  return response.blob();
 }

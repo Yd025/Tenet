@@ -1,15 +1,28 @@
+"""
+Conversation Exporter Agent — exports conversations from MongoDB (via the
+webapp REST API) to JSON, Markdown, CSV, or HTML.
+"""
+import csv
+import io
+import json
+import os
+from datetime import datetime
+
+import httpx
 from uagents import Agent, Context
 from protocols.export_protocol import (
-    ExportRequest, ExportResponse, export_protocol, ExportFormat, ExportTarget
+    ExportRequest, ExportResponse, export_protocol, ExportFormat, ExportTarget,
 )
 from config.agent_config import AgentConfig
-import json
-from datetime import datetime
-from utils.local_runtime import dag_store
+from utils.webapp_dag_store import WebappDagStore
+
+WEBAPP_API = os.getenv("WEBAPP_API_URL", "http://127.0.0.1:8000/api")
+_TIMEOUT = 15.0
+
 
 class TenetConversationExporter:
-    """Exports conversations in various formats"""
-    
+    """Exports conversations using live data from the webapp REST API."""
+
     def __init__(self):
         self.config = AgentConfig()
         self.agent = Agent(
@@ -19,13 +32,12 @@ class TenetConversationExporter:
             mailbox=True,
             publish_agent_details=True,
         )
+        self.dag_store = WebappDagStore()
         self.setup_handlers()
 
     def setup_handlers(self):
-        """Setup export handlers"""
         @export_protocol.on_message(model=ExportRequest)
         async def handle_export_request(ctx: Context, sender: str, msg: ExportRequest):
-            """Handle export requests"""
             try:
                 if msg.export_format == ExportFormat.JSON:
                     response = await self.export_json(msg)
@@ -35,326 +47,159 @@ class TenetConversationExporter:
                     response = await self.export_csv(msg)
                 elif msg.export_format == ExportFormat.HTML:
                     response = await self.export_html(msg)
-                elif msg.export_format == ExportFormat.PDF:
-                    response = await self.export_pdf(msg)
                 else:
                     response = {
-                        "success": False,
-                        "export_url": None,
-                        "export_data": None,
-                        "export_size_bytes": 0,
-                        "export_format": msg.export_format,
+                        "success": False, "export_url": None, "export_data": None,
+                        "export_size_bytes": 0, "export_format": msg.export_format,
                         "items_exported": 0,
-                        "message": f"Unsupported export format: {msg.export_format}"
+                        "message": f"Unsupported export format: {msg.export_format}",
                     }
                 await ctx.send(sender, ExportResponse(**response))
             except Exception as e:
-                error_response = {
-                    "success": False,
-                    "export_url": None,
-                    "export_data": None,
-                    "export_size_bytes": 0,
-                    "export_format": msg.export_format,
-                    "items_exported": 0,
-                    "message": f"Export failed: {str(e)}"
-                }
-                await ctx.send(sender, ExportResponse(**error_response))
+                await ctx.send(sender, ExportResponse(
+                    success=False, export_url=None, export_data=None,
+                    export_size_bytes=0, export_format=msg.export_format,
+                    items_exported=0, message=f"Export failed: {e}",
+                ))
+
+    # ------------------------------------------------------------------
+    # Data fetching
+    # ------------------------------------------------------------------
+
+    def _fetch_nodes(self, msg: ExportRequest) -> list[dict]:
+        if msg.target_type == ExportTarget.CONVERSATION:
+            return self.dag_store.list_nodes(msg.target_id) or []
+        elif msg.target_type == ExportTarget.NODE:
+            node = self.dag_store.get_node(msg.target_id)
+            return [node] if node else []
+        return []
+
+    def _fetch_conversation_meta(self, root_id: str) -> dict:
+        try:
+            r = httpx.get(f"{WEBAPP_API}/conversations/{root_id}", timeout=_TIMEOUT)
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass
+        return {}
+
+    # ------------------------------------------------------------------
+    # Format converters
+    # ------------------------------------------------------------------
+
+    def _to_json(self, nodes: list[dict], meta: dict) -> str:
+        payload = {
+            "conversation": meta,
+            "nodes": nodes,
+            "exported_at": datetime.now().isoformat(),
+        }
+        return json.dumps(payload, indent=2, default=str)
+
+    def _to_markdown(self, nodes: list[dict], meta: dict, include_metadata: bool) -> str:
+        title = meta.get("title") or "Exported Conversation"
+        lines = [f"# {title}\n"]
+        nodes_sorted = sorted(nodes, key=lambda n: n.get("timestamp", ""))
+        for node in nodes_sorted:
+            prompt = node.get("prompt", "")
+            response = node.get("response", "")
+            if prompt and prompt not in ("⎇ Merge Synthesis",):
+                lines.append(f"**User:** {prompt}\n")
+            if response:
+                lines.append(f"**AI:** {response}\n")
+            if include_metadata and node.get("metadata"):
+                lines.append(f"*metadata: {node['metadata']}*\n")
+            lines.append("---\n")
+        lines.append(f"\n*Exported {datetime.now().isoformat()}*")
+        return "\n".join(lines)
+
+    def _to_csv(self, nodes: list[dict]) -> str:
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow(["node_id", "parent_ids", "prompt", "response", "model_used", "timestamp"])
+        for n in sorted(nodes, key=lambda x: x.get("timestamp", "")):
+            writer.writerow([
+                n.get("node_id", ""),
+                ",".join(n.get("parent_ids", [])),
+                n.get("prompt", ""),
+                n.get("response", ""),
+                n.get("model_used", ""),
+                n.get("timestamp", ""),
+            ])
+        return out.getvalue()
+
+    def _to_html(self, nodes: list[dict], meta: dict) -> str:
+        title = meta.get("title") or "Exported Conversation"
+        rows = []
+        for n in sorted(nodes, key=lambda x: x.get("timestamp", "")):
+            prompt = n.get("prompt", "").replace("<", "&lt;").replace(">", "&gt;")
+            response = n.get("response", "").replace("<", "&lt;").replace(">", "&gt;")
+            rows.append(
+                f"<div class='node'>"
+                f"<p class='prompt'><strong>User:</strong> {prompt}</p>"
+                f"<p class='response'><strong>AI:</strong> {response}</p>"
+                f"</div>"
+            )
+        body = "\n".join(rows)
+        return (
+            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            f"<title>{title}</title>"
+            f"<style>body{{font-family:sans-serif;max-width:800px;margin:auto;padding:2rem}}"
+            f".node{{border-bottom:1px solid #eee;padding:1rem 0}}"
+            f".prompt{{color:#333}}.response{{color:#555}}</style></head>"
+            f"<body><h1>{title}</h1>{body}"
+            f"<p><em>Exported {datetime.now().isoformat()}</em></p></body></html>"
+        )
+
+    # ------------------------------------------------------------------
+    # Export handlers
+    # ------------------------------------------------------------------
 
     async def export_json(self, msg: ExportRequest) -> dict:
-        """Export as JSON"""
-        try:
-            data = await self.get_export_data(msg)
-            json_data = json.dumps(data, indent=2, default=str)
-            
-            if len(json_data) < 10000: 
-                return {
-                    "success": True,
-                    "export_url": None,
-                    "export_data": json_data,
-                    "export_size_bytes": len(json_data.encode('utf-8')),
-                    "export_format": ExportFormat.JSON,
-                    "items_exported": data.get("items_count", 0),
-                    "message": "JSON export completed successfully"
-                }
-            else:
-                export_url = await self.save_export_file(json_data, "json", msg.target_id)
-                return {
-                    "success": True,
-                    "export_url": export_url,
-                    "export_data": None,
-                    "export_size_bytes": len(json_data.encode('utf-8')),
-                    "export_format": ExportFormat.JSON,
-                    "items_exported": data.get("items_count", 0),
-                    "message": f"JSON export saved to {export_url}"
-                }
-        except Exception as e:
-            return {
-                "success": False,
-                "export_url": None,
-                "export_data": None,
-                "export_size_bytes": 0,
-                "export_format": ExportFormat.JSON,
-                "items_exported": 0,
-                "message": f"JSON export failed: {str(e)}"
-            }
+        nodes = self._fetch_nodes(msg)
+        meta = self._fetch_conversation_meta(msg.target_id) if msg.target_type == ExportTarget.CONVERSATION else {}
+        data = self._to_json(nodes, meta)
+        return {
+            "success": True, "export_url": None, "export_data": data,
+            "export_size_bytes": len(data.encode()), "export_format": ExportFormat.JSON,
+            "items_exported": len(nodes), "message": f"Exported {len(nodes)} nodes as JSON",
+        }
 
     async def export_markdown(self, msg: ExportRequest) -> dict:
-        """Export as Markdown"""
-        try:
-            data = await self.get_export_data(msg)
-            markdown_content = self.convert_to_markdown(data, msg.include_metadata, msg.include_branches)
-            
-            if len(markdown_content) < 10000:
-                return {
-                    "success": True,
-                    "export_url": None,
-                    "export_data": markdown_content,
-                    "export_size_bytes": len(markdown_content.encode('utf-8')),
-                    "export_format": ExportFormat.MARKDOWN,
-                    "items_exported": data.get("items_count", 0),
-                    "message": "Markdown export completed successfully"
-                }
-            else:
-                export_url = await self.save_export_file(markdown_content, "md", msg.target_id)
-                return {
-                    "success": True,
-                    "export_url": export_url,
-                    "export_data": None,
-                    "export_size_bytes": len(markdown_content.encode('utf-8')),
-                    "export_format": ExportFormat.MARKDOWN,
-                    "items_exported": data.get("items_count", 0),
-                    "message": f"Markdown export saved to {export_url}"
-                }
-        except Exception as e:
-            return {
-                "success": False,
-                "export_url": None,
-                "export_data": None,
-                "export_size_bytes": 0,
-                "export_format": ExportFormat.MARKDOWN,
-                "items_exported": 0,
-                "message": f"Markdown export failed: {str(e)}"
-            }
+        nodes = self._fetch_nodes(msg)
+        meta = self._fetch_conversation_meta(msg.target_id) if msg.target_type == ExportTarget.CONVERSATION else {}
+        data = self._to_markdown(nodes, meta, getattr(msg, "include_metadata", False))
+        return {
+            "success": True, "export_url": None, "export_data": data,
+            "export_size_bytes": len(data.encode()), "export_format": ExportFormat.MARKDOWN,
+            "items_exported": len(nodes), "message": f"Exported {len(nodes)} nodes as Markdown",
+        }
 
     async def export_csv(self, msg: ExportRequest) -> dict:
-        """Export as CSV"""
-        try:
-            data = await self.get_export_data(msg)
-            csv_content = self.convert_to_csv(data)
-            
-            export_url = await self.save_export_file(csv_content, "csv", msg.target_id)
-            return {
-                "success": True,
-                "export_url": export_url,
-                "export_data": None,
-                "export_size_bytes": len(csv_content.encode('utf-8')),
-                "export_format": ExportFormat.CSV,
-                "items_exported": data.get("items_count", 0),
-                "message": f"CSV export saved to {export_url}"
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "export_url": None,
-                "export_data": None,
-                "export_size_bytes": 0,
-                "export_format": ExportFormat.CSV,
-                "items_exported": 0,
-                "message": f"CSV export failed: {str(e)}"
-            }
+        nodes = self._fetch_nodes(msg)
+        data = self._to_csv(nodes)
+        return {
+            "success": True, "export_url": None, "export_data": data,
+            "export_size_bytes": len(data.encode()), "export_format": ExportFormat.CSV,
+            "items_exported": len(nodes), "message": f"Exported {len(nodes)} nodes as CSV",
+        }
 
     async def export_html(self, msg: ExportRequest) -> dict:
-        """Export as HTML"""
-        try:
-            data = await self.get_export_data(msg)
-            html_content = self.convert_to_html(data, msg.include_metadata, msg.include_branches)
-            
-            export_url = await self.save_export_file(html_content, "html", msg.target_id)
-            return {
-                "success": True,
-                "export_url": export_url,
-                "export_data": None,
-                "export_size_bytes": len(html_content.encode('utf-8')),
-                "export_format": ExportFormat.HTML,
-                "items_exported": data.get("items_count", 0),
-                "message": f"HTML export saved to {export_url}"
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "export_url": None,
-                "export_data": None,
-                "export_size_bytes": 0,
-                "export_format": ExportFormat.HTML,
-                "items_exported": 0,
-                "message": f"HTML export failed: {str(e)}"
-            }
-
-    async def export_pdf(self, msg: ExportRequest) -> dict:
-        """Export as PDF"""
-        try:
-            data = await self.get_export_data(msg)
-            markdown_content = self.convert_to_markdown(data, msg.include_metadata, msg.include_branches)
-            
-            export_url = await self.save_export_file(markdown_content, "md", msg.target_id)
-            return {
-                "success": True,
-                "export_url": export_url,
-                "export_data": None,
-                "export_size_bytes": len(markdown_content.encode('utf-8')),
-                "export_format": ExportFormat.PDF,
-                "items_exported": data.get("items_count", 0),
-                "message": f"PDF export (markdown placeholder) saved to {export_url}"
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "export_url": None,
-                "export_data": None,
-                "export_size_bytes": 0,
-                "export_format": ExportFormat.PDF,
-                "items_exported": 0,
-                "message": f"PDF export failed: {str(e)}"
-            }
-
-    async def get_export_data(self, msg: ExportRequest) -> dict:
-        """Get data from local DAG store for export"""
-        if msg.target_type == ExportTarget.CONVERSATION:
-            data = dag_store.get_graph(msg.target_id, include_pruned=False)
-            data["branches"] = [dag_store.get_branch(b["branch_id"]) or b for b in data.get("branches", [])]
-            data["items_count"] = len(data.get("nodes", []))
-            return data
-        elif msg.target_type == ExportTarget.BRANCH:
-            data = dag_store.get_branch(msg.target_id) or {}
-            data["items_count"] = len(data.get("nodes", []))
-            return data
-        elif msg.target_type == ExportTarget.NODE:
-            data = dag_store.get_node(msg.target_id) or {}
-            data["items_count"] = 1 if data else 0
-            return data
-        else:
-            raise ValueError(f"Unknown target type: {msg.target_type}")
-
-    def convert_to_markdown(self, data: dict, include_metadata: bool, include_branches: bool) -> str:
-        """Convert data to Markdown format"""
-        md_lines = []
-        if "conversation_name" in data:
-            md_lines.append(f"# {data['conversation_name']}\n")
-        elif "branch_name" in data:
-            md_lines.append(f"# {data['branch_name']}\n")
-        else:
-            md_lines.append("# Exported Conversation\n")
-            
-        if include_metadata and "metadata" in data:
-            md_lines.append("## Metadata\n")
-            for key, value in data["metadata"].items():
-                md_lines.append(f"- **{key}**: {value}\n")
-            md_lines.append("")
-            
-        if include_branches and "branches" in data:
-            for branch in data["branches"]:
-                md_lines.append(f"## Branch: {branch.get('branch_name', 'Unknown')}\n")
-                for node in branch.get("nodes", []):
-                    md_lines.append(f"### Node: {node.get('node_id', 'Unknown')}\n")
-                    md_lines.append(f"**User:** {node.get('prompt', '')}\n\n")
-                    md_lines.append(f"**AI:** {node.get('response', '')}\n\n")
-                    if include_metadata and "metadata" in node:
-                        md_lines.append("*Metadata:* " + str(node["metadata"]) + "\n\n")
-        elif "nodes" in data:
-            for node in data["nodes"]:
-                md_lines.append(f"## Node: {node.get('node_id', 'Unknown')}\n")
-                md_lines.append(f"**User:** {node.get('prompt', '')}\n\n")
-                md_lines.append(f"**AI:** {node.get('response', '')}\n\n")
-                if include_metadata and "metadata" in node:
-                    md_lines.append("*Metadata:* " + str(node["metadata"]) + "\n\n")
-                    
-        md_lines.append(f"\n---\n*Exported on {datetime.now().isoformat()}*")
-        return "\n".join(md_lines)
-
-    def convert_to_csv(self, data: dict) -> str:
-        """Convert data to CSV format"""
-        import csv
-        import io
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        writer.writerow(["Node ID", "Branch ID", "Prompt", "Response", "Timestamp"])
-        
-        if "branches" in data:
-            for branch in data["branches"]:
-                branch_id = branch.get("branch_id", "")
-                for node in branch.get("nodes", []):
-                    writer.writerow([
-                        node.get("node_id", ""),
-                        branch_id,
-                        node.get("prompt", ""),
-                        node.get("response", ""),
-                        node.get("timestamp", "")
-                    ])
-        elif "nodes" in data:
-            for node in data["nodes"]:
-                writer.writerow([
-                    node.get("node_id", ""),
-                    node.get("branch_id", ""),
-                    node.get("prompt", ""),
-                    node.get("response", ""),
-                    node.get("timestamp", "")
-                ])
-                
-        return output.getvalue()
-
-    def convert_to_html(self, data: dict, include_metadata: bool, include_branches: bool) -> str:
-        """Convert data to HTML format"""
-        html_lines = []
-        html_lines.append("")
-        html_lines.append("Exported Conversation")
-        html_lines.append("")
-        
-        if "conversation_name" in data:
-            html_lines.append(f"<h1>{data['conversation_name']}</h1>")
-        elif "branch_name" in data:
-            html_lines.append(f"<h1>{data['branch_name']}</h1>")
-            
-        if include_branches and "branches" in data:
-            for branch in data["branches"]:
-                html_lines.append(f"<h2>Branch: {branch.get('branch_name', 'Unknown')}</h2>")
-                for node in branch.get("nodes", []):
-                    html_lines.append(f"")
-                    html_lines.append(f"<h3>Node: {node.get('node_id', 'Unknown')}</h3>")
-                    html_lines.append(f"<strong>User:</strong>{node.get('prompt', '')}")
-                    html_lines.append(f"<strong>AI:</strong>{node.get('response', '')}")
-                    if include_metadata and "metadata" in node:
-                        html_lines.append(f"{str(node['metadata'])}")
-                    html_lines.append("")
-        elif "nodes" in data:
-            for node in data["nodes"]:
-                html_lines.append(f"")
-                html_lines.append(f"<h3>Node: {node.get('node_id', 'Unknown')}</h3>")
-                html_lines.append(f"<strong>User:</strong>{node.get('prompt', '')}")
-                html_lines.append(f"<strong>AI:</strong>{node.get('response', '')}")
-                if include_metadata and "metadata" in node:
-                    html_lines.append(f"{str(node['metadata'])}")
-                html_lines.append("")
-                
-        html_lines.append(f"<p><em>Exported on {datetime.now().isoformat()}</em></p>")
-        html_lines.append("")
-        return "\n".join(html_lines)
-
-    async def save_export_file(self, content: str, format: str, target_id: str) -> str:
-        """Save export to file and return URL"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"export_{target_id}_{timestamp}.{format}"
-        return f"local://exports/{filename}"
+        nodes = self._fetch_nodes(msg)
+        meta = self._fetch_conversation_meta(msg.target_id) if msg.target_type == ExportTarget.CONVERSATION else {}
+        data = self._to_html(nodes, meta)
+        return {
+            "success": True, "export_url": None, "export_data": data,
+            "export_size_bytes": len(data.encode()), "export_format": ExportFormat.HTML,
+            "items_exported": len(nodes), "message": f"Exported {len(nodes)} nodes as HTML",
+        }
 
     def run(self):
-        """Start the conversation exporter agent"""
         self.agent.include(export_protocol)
-        print("📤 Tenet Conversation Exporter Agent starting...")
+        print("📤 Tenet Conversation Exporter Agent starting (webapp-backed)...")
         print(f"📍 Agent Address: {self.agent.address}")
-        print(f"🔗 Export Protocol: Enabled")
-        print("📄 Export formats: JSON, Markdown, CSV, HTML, PDF")
+        print("🔗 Export Protocol: Enabled")
         self.agent.run()
 
+
 if __name__ == "__main__":
-    exporter = TenetConversationExporter()
-    exporter.run()
+    TenetConversationExporter().run()

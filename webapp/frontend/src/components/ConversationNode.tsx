@@ -128,20 +128,9 @@ export default function ConversationNodeSVG({ data, x, y, onContextMenu }: Conve
         <circle r={NODE_RADIUS + 2} fill="none" stroke={fill} strokeWidth={1.5} opacity={0.6} />
       )}
 
-      {/* Label — prefix in teal/accent, summary in normal color */}
-      <text x={NODE_RADIUS + 8} y={-2} fontSize={11} fontWeight={600} dominantBaseline="auto" fontFamily="ui-monospace, monospace">
-        {(() => {
-          const colonIdx = data.label.indexOf(': ');
-          if (colonIdx === -1) return <tspan fill={labelColor}>{data.label}</tspan>;
-          const prefix = data.label.slice(0, colonIdx + 1);
-          const title = data.label.slice(colonIdx + 2);
-          return (
-            <>
-              <tspan fill={isDark ? '#2DD4BF' : '#0d9488'} fontWeight={700}>{prefix}</tspan>
-              <tspan fill={labelColor} fontWeight={500} fontFamily="system-ui, sans-serif"> {title.slice(0, 22)}{title.length > 22 ? '…' : ''}</tspan>
-            </>
-          );
-        })()}
+      {/* Label — single color, hard cutoff to prevent overlap */}
+      <text x={NODE_RADIUS + 8} y={-2} fontSize={11} fontWeight={600} dominantBaseline="auto" fontFamily="system-ui, sans-serif" fill={labelColor}>
+        {data.label.length > 20 ? data.label.slice(0, 20) + '…' : data.label}
       </text>
 
       {/* Sublabel */}

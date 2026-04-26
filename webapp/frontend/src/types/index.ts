@@ -20,6 +20,7 @@ export interface ConversationNode {
   metadata?: {
     summary_title?: string;
     summary_subtitle?: string;
+    summary_failed?: boolean;
     [key: string]: unknown;
   };
 }
@@ -35,6 +36,22 @@ export interface TelemetryStats {
   temp_c?: number;
   gpu_clock_mhz?: number;
   utilization?: number;
+  vram_gb?: number;
+  vram_total_gb?: number;
   active_nodes: number;
   tps?: number;
+  loaded_models?: string[];
+  alerts?: string[];
 }
+
+export interface GraphIntegrityResult {
+  root_id: string;
+  valid: boolean;
+  total_nodes_checked: number;
+  cycles_detected: number;
+  orphan_nodes: number;
+  parent_child_mismatches: number;
+  message: string;
+}
+
+export type ExportFormat = 'json' | 'markdown' | 'csv' | 'html';

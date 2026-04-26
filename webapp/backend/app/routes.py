@@ -1,8 +1,8 @@
 import os, time, json, uuid, logging
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
-from .models import Node, ChatRequest, MergeRequest, RootMergeRequest, NodeSummaryRequest, UpdateNodeRequest, UpdateConversationRequest, BulkDeleteRequest
+from fastapi.responses import StreamingResponse, Response
+from .models import Node, ChatRequest, MergeRequest, RootMergeRequest, NodeSummaryRequest, UpdateNodeRequest, UpdateConversationRequest, BulkDeleteRequest, ExportRequest
 from .database import nodes_collection, conversations_collection
 import httpx
 import pynvml
@@ -23,9 +23,34 @@ except Exception as e:
 router = APIRouter()
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 
+# Cache for Ollama loaded-model list — refreshed at most once every 10 seconds
+_ollama_models_cache: list[str] = []
+_ollama_models_cache_ts: float = 0.0
+_OLLAMA_MODELS_TTL = 10.0
+
+
+async def _get_ollama_loaded_models() -> list[str]:
+    global _ollama_models_cache, _ollama_models_cache_ts
+    now = time.time()
+    if now - _ollama_models_cache_ts < _OLLAMA_MODELS_TTL:
+        return _ollama_models_cache
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{OLLAMA_URL}/api/ps")
+            if resp.status_code == 200:
+                _ollama_models_cache = [
+                    m.get("name") or m.get("model", "")
+                    for m in resp.json().get("models", [])
+                    if m.get("name") or m.get("model")
+                ]
+                _ollama_models_cache_ts = now
+    except Exception:
+        pass
+    return _ollama_models_cache
+
 # --- HELPER: CONTEXT RECONSTRUCTION ---
 async def get_history(last_node_id: str):
-    """Walk the parent chain and return messages in chronological order, skipping pruned nodes."""
+    """Walk the parent chain and return messages in chronological order."""
     chain = []
     curr = last_node_id
     while curr:
@@ -33,8 +58,7 @@ async def get_history(last_node_id: str):
         if not node:
             break
         parent_ids = node.get("parent_ids") or []
-        if not node.get("pruned"):
-            chain.append(node)
+        chain.append(node)
         curr = parent_ids[0] if parent_ids else None
 
     # chain is leaf→root, reverse to get root→leaf (chronological)
@@ -278,6 +302,8 @@ async def generate_node_summaries(req: NodeSummaryRequest):
         existing_metadata = node.get("metadata", {}) or {}
         existing_title = str(existing_metadata.get("summary_title", "")).strip()
         existing_subtitle = str(existing_metadata.get("summary_subtitle", "")).strip()
+
+        # Already summarised (including previously written fallbacks) — return as-is
         if existing_title and existing_subtitle:
             summaries.append(
                 {
@@ -286,6 +312,10 @@ async def generate_node_summaries(req: NodeSummaryRequest):
                     "subtitle": _limit_words(existing_subtitle, 20),
                 }
             )
+            continue
+
+        # Skip nodes that already failed — don't hammer Ollama while it's busy
+        if existing_metadata.get("summary_failed"):
             continue
 
         summarizer_prompt = (
@@ -299,7 +329,7 @@ async def generate_node_summaries(req: NodeSummaryRequest):
         subtitle = _limit_words(node.get("response", "") or node.get("prompt", "") or "Conversation node", 20)
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=12.0) as client:
                 resp = await client.post(
                     f"{OLLAMA_URL}/api/generate",
                     json={"model": req.model, "prompt": summarizer_prompt, "stream": False},
@@ -314,14 +344,26 @@ async def generate_node_summaries(req: NodeSummaryRequest):
                         title = _limit_words(parsed_title, 5)
                     if parsed_subtitle:
                         subtitle = _limit_words(parsed_subtitle, 20)
-        except Exception as e:
-            logger.warning(f"Node summary generation failed for {node.get('node_id')}: {e}")
 
-        await nodes_collection.update_one(
-            {"node_id": node["node_id"]},
-            {"$set": {"metadata.summary_title": title, "metadata.summary_subtitle": subtitle}},
-        )
-        summaries.append({"node_id": node["node_id"], "title": title, "subtitle": subtitle})
+            # Success — persist and return
+            await nodes_collection.update_one(
+                {"node_id": node["node_id"]},
+                {"$set": {
+                    "metadata.summary_title": title,
+                    "metadata.summary_subtitle": subtitle,
+                    "metadata.summary_failed": False,
+                }},
+            )
+            summaries.append({"node_id": node["node_id"], "title": title, "subtitle": subtitle})
+
+        except Exception as e:
+            logger.warning(f"Node summary generation failed for {node.get('node_id')}: {type(e).__name__}: {e}")
+            # Mark as failed so we don't retry on the next poll — frontend can
+            # clear this flag by explicitly requesting a refresh later
+            await nodes_collection.update_one(
+                {"node_id": node["node_id"]},
+                {"$set": {"metadata.summary_failed": True}},
+            )
 
     return {"summaries": summaries}
 
@@ -364,15 +406,29 @@ async def generate_title(prompt: str, model: str) -> str:
         return prompt[:40]
 
 
+_STOPWORDS = {
+    "the", "and", "are", "for", "that", "this", "with", "what", "how",
+    "why", "who", "when", "where", "was", "were", "has", "have", "had",
+    "not", "but", "from", "they", "their", "there", "been", "will",
+    "can", "its", "you", "your", "all", "any", "one", "out", "about",
+    "which", "would", "could", "should", "than", "then", "into", "also",
+    "more", "some", "just", "like", "over", "such", "each", "most",
+}
+
+
 def _tokenize(text: str) -> set[str]:
-    return {t for t in ''.join(c.lower() if c.isalnum() else ' ' for c in text).split() if len(t) > 2}
+    tokens = ''.join(c.lower() if c.isalnum() else ' ' for c in text).split()
+    return {t for t in tokens if len(t) > 2 and t not in _STOPWORDS}
 
 
 def _candidate_score(prompt_tokens: set[str], node: dict) -> int:
-    node_tokens = _tokenize(f"{node.get('prompt', '')} {node.get('response', '')}")
-    overlap = len(prompt_tokens.intersection(node_tokens))
-    recency_bonus = 1 if node.get("timestamp") else 0
-    return overlap * 10 + recency_bonus
+    node_prompt_tokens = _tokenize(node.get("prompt", ""))
+    node_response_tokens = _tokenize(node.get("response", ""))
+    # Prompt matches are worth 3x — topic word in the node's question is a
+    # much stronger signal than it appearing somewhere in a long response
+    prompt_overlap = len(prompt_tokens.intersection(node_prompt_tokens))
+    response_overlap = len(prompt_tokens.intersection(node_response_tokens - node_prompt_tokens))
+    return prompt_overlap * 3 + response_overlap
 
 
 async def choose_auto_parent_id(req: ChatRequest) -> str | None:
@@ -380,59 +436,40 @@ async def choose_auto_parent_id(req: ChatRequest) -> str | None:
     if not nodes:
         return None
 
-    prompt_tokens = _tokenize(req.prompt)
-    scored = sorted(
-        nodes,
-        key=lambda n: (_candidate_score(prompt_tokens, n), n.get("timestamp", "")),
-        reverse=True,
-    )
-    candidates = scored[:8]
-
-    # Fast fallback when no useful candidates exist.
+    # Exclude internal system marker nodes — they have no real content to score
+    candidates = [
+        n for n in nodes
+        if n.get("prompt") != "SYSTEM_MERGE_ACTION"
+    ]
     if not candidates:
         return None
 
-    candidate_lines = []
-    for c in candidates:
-        snippet = (c.get("prompt", "") + " " + c.get("response", "")).strip().replace("\n", " ")
-        candidate_lines.append(f"- {c.get('node_id')}: {snippet[:220]}")
-
-    selector_prompt = (
-        "You are an auto-branch selector for a conversation graph.\n"
-        "Pick exactly one best parent node id for the next user prompt.\n"
-        "Return strict JSON with this schema only: "
-        '{"parent_id":"<node_id>","reason":"<short reason>"}\n\n'
-        f'New prompt: "{req.prompt}"\n'
-        "Candidates:\n"
-        + "\n".join(candidate_lines)
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={
-                    "model": req.model,
-                    "prompt": selector_prompt,
-                    "stream": False,
-                },
-            )
-            resp.raise_for_status()
-            raw = resp.json().get("response", "").strip()
-            parsed = json.loads(_extract_json_block(raw))
-            parent_id = parsed.get("parent_id")
-            if isinstance(parent_id, str) and any(n.get("node_id") == parent_id for n in candidates):
-                return parent_id
-    except Exception as e:
-        logger.warning(f"Auto branching selector failed, using fallback: {e}")
-
-    # Fallback: most recent candidate by top-level timestamp.
-    candidates_sorted = sorted(
+    prompt_tokens = _tokenize(req.prompt)
+    scored = sorted(
         candidates,
-        key=lambda n: n.get("timestamp", ""),
+        key=lambda n: (_candidate_score(prompt_tokens, n), n.get("timestamp", "")),
         reverse=True,
     )
-    return candidates_sorted[0].get("node_id")
+
+    winner = scored[0]
+    top_score = _candidate_score(prompt_tokens, winner)
+
+    for node in scored:
+        score = _candidate_score(prompt_tokens, node)
+        node_tokens = _tokenize(f"{node.get('prompt', '')} {node.get('response', '')}")
+        matched = prompt_tokens.intersection(node_tokens)
+        logger.info(
+            f"  candidate score={score} matched={matched} "
+            f"node_id={node.get('node_id')} "
+            f"prompt={str(node.get('prompt', ''))[:50]!r}"
+        )
+
+    logger.info(
+        f"Auto branching: prompt_tokens={prompt_tokens} "
+        f"winner={winner.get('node_id')} score={top_score} "
+        f"winner_prompt={str(winner.get('prompt', ''))[:60]!r}"
+    )
+    return winner.get("node_id")
 
 # --- 5. STREAMING CHAT (Branching) ---
 @router.post("/chat/stream")
@@ -514,13 +551,13 @@ async def stream_chat(req: ChatRequest):
 # --- 6. NODE MERGE (Intra-Root) ---
 @router.post("/merge/nodes")
 async def merge_nodes(req: MergeRequest):
+    if len(req.node_ids) < 2 or len(req.node_ids) > 5:
+        raise HTTPException(status_code=400, detail="Merge requires between 2 and 5 node_ids")
+
     nodes = await nodes_collection.find({"node_id": {"$in": req.node_ids}}).to_list(10)
-    
+
     # Check if we actually found nodes
     if not nodes:
-        raise HTTPException(status_code=404, detail="Source nodes for merge not found")
-
-    if len(req.node_ids) < 2 or len(req.node_ids) > 5:
         raise HTTPException(status_code=400, detail="Merge requires between 2 and 5 node_ids")
 
     node_by_id = {n.get("node_id"): n for n in nodes}
@@ -643,10 +680,10 @@ async def merge_roots(req: RootMergeRequest):
     context_str = "\n---\n".join([f"Project {n['root_id']}: {n['response']}" for n in leaf_nodes])
     prompt = f"You are merging two distinct projects into a new workspace. Summarize the intersection:\n\n{context_str}"
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(f"{OLLAMA_URL}/api/generate", 
                                  json={"model": req.model, "prompt": prompt, "stream": False})
-        summary = resp.json().get("response")
+        summary = resp.json().get("response") or "Root merge failed to generate summary."
 
     new_node = Node(
         parent_ids=[n['node_id'] for n in leaf_nodes],
@@ -657,3 +694,218 @@ async def merge_roots(req: RootMergeRequest):
     )
     await nodes_collection.insert_one(new_node.model_dump())
     return {"message": "Roots unified", "new_root": req.new_root_name, "node_id": new_node.node_id}
+
+
+# ---------------------------------------------------------------------------
+# AGENT-INTEGRATED ROUTES
+# ---------------------------------------------------------------------------
+
+# --- A1. GRAPH INTEGRITY CHECK ---
+@router.get("/graph-integrity/{root_id}")
+async def check_graph_integrity(root_id: str, include_pruned: bool = Query(False)):
+    """
+    Validate the DAG for a conversation: detect cycles, orphan nodes,
+    and parent-child mismatches.  Runs entirely in-process against MongoDB.
+    """
+    query: dict = {"root_id": root_id}
+    if not include_pruned:
+        query["pruned"] = {"$ne": True}
+    raw_nodes = await nodes_collection.find(query).to_list(5000)
+
+    # Build node map with normalised parent_id / children_ids
+    nodes: dict[str, dict] = {}
+    for n in raw_nodes:
+        nid = n.get("node_id")
+        if not nid:
+            continue
+        parent_ids = n.get("parent_ids") or []
+        nodes[nid] = {
+            "node_id": nid,
+            "parent_id": parent_ids[0] if parent_ids else None,
+            "parent_ids": parent_ids,
+            "children_ids": [],
+        }
+
+    # Reconstruct children_ids from parent_ids
+    for node in nodes.values():
+        for pid in node["parent_ids"]:
+            if pid in nodes and node["node_id"] not in nodes[pid]["children_ids"]:
+                nodes[pid]["children_ids"].append(node["node_id"])
+
+    orphan_nodes = 0
+    mismatches = 0
+    for node in nodes.values():
+        pid = node["parent_id"]
+        if pid and pid not in nodes:
+            orphan_nodes += 1
+        for cid in node["children_ids"]:
+            child = nodes.get(cid)
+            if not child:
+                mismatches += 1
+            elif child["parent_id"] != node["node_id"]:
+                mismatches += 1
+
+    # Iterative DFS cycle detection
+    WHITE, GRAY, BLACK = 0, 1, 2
+    colors = {nid: WHITE for nid in nodes}
+    cycles = 0
+
+    def dfs(start: str):
+        nonlocal cycles
+        stack = [(start, False)]
+        while stack:
+            nid, returning = stack.pop()
+            if returning:
+                colors[nid] = BLACK
+                continue
+            if colors[nid] != WHITE:
+                continue
+            colors[nid] = GRAY
+            stack.append((nid, True))
+            for cid in nodes[nid]["children_ids"]:
+                if cid not in nodes:
+                    continue
+                if colors[cid] == GRAY:
+                    cycles += 1
+                elif colors[cid] == WHITE:
+                    stack.append((cid, False))
+
+    for nid in nodes:
+        if colors[nid] == WHITE:
+            dfs(nid)
+
+    valid = cycles == 0 and orphan_nodes == 0 and mismatches == 0
+    return {
+        "root_id": root_id,
+        "valid": valid,
+        "total_nodes_checked": len(nodes),
+        "cycles_detected": cycles,
+        "orphan_nodes": orphan_nodes,
+        "parent_child_mismatches": mismatches,
+        "message": "Graph is valid" if valid else "Graph integrity violations found",
+    }
+
+
+# --- A2. EXPORT CONVERSATION ---
+@router.post("/export")
+async def export_conversation(req: ExportRequest):
+    """
+    Export all nodes for a conversation in the requested format.
+    Returns the content inline (as a string in JSON, or as a file download
+    for csv/html/markdown).
+    """
+    nodes = await nodes_collection.find(
+        {"root_id": req.root_id, "pruned": {"$ne": True}}
+    ).sort("_id", 1).to_list(5000)
+    for n in nodes:
+        n.pop("_id", None)
+
+    conv = await conversations_collection.find_one({"root_id": req.root_id})
+    if conv:
+        conv.pop("_id", None)
+    title = (conv or {}).get("title") or req.root_id
+    exported_at = datetime.now(timezone.utc).isoformat()
+
+    fmt = req.format.lower()
+
+    if fmt == "json":
+        payload = json.dumps(
+            {"conversation": conv or {}, "nodes": nodes, "exported_at": exported_at},
+            indent=2, default=str,
+        )
+        return {"format": "json", "items_exported": len(nodes), "data": payload}
+
+    if fmt == "markdown":
+        lines = [f"# {title}\n"]
+        for n in sorted(nodes, key=lambda x: x.get("timestamp", "")):
+            prompt = n.get("prompt", "")
+            response = n.get("response", "")
+            if prompt and prompt not in ("⎇ Merge Synthesis",):
+                lines.append(f"**User:** {prompt}\n")
+            if response:
+                lines.append(f"**AI:** {response}\n")
+            if req.include_metadata and n.get("metadata"):
+                lines.append(f"*metadata: {n['metadata']}*\n")
+            lines.append("---\n")
+        lines.append(f"\n*Exported {exported_at}*")
+        content = "\n".join(lines)
+        return Response(
+            content=content,
+            media_type="text/markdown",
+            headers={"Content-Disposition": f'attachment; filename="{req.root_id}.md"'},
+        )
+
+    if fmt == "csv":
+        import csv as csv_mod
+        import io
+        out = io.StringIO()
+        writer = csv_mod.writer(out)
+        writer.writerow(["node_id", "parent_ids", "prompt", "response", "model_used", "timestamp"])
+        for n in sorted(nodes, key=lambda x: x.get("timestamp", "")):
+            writer.writerow([
+                n.get("node_id", ""),
+                ",".join(n.get("parent_ids", [])),
+                n.get("prompt", ""),
+                n.get("response", ""),
+                n.get("model_used", ""),
+                n.get("timestamp", ""),
+            ])
+        return Response(
+            content=out.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{req.root_id}.csv"'},
+        )
+
+    if fmt == "html":
+        rows = []
+        for n in sorted(nodes, key=lambda x: x.get("timestamp", "")):
+            p = (n.get("prompt") or "").replace("<", "&lt;").replace(">", "&gt;")
+            r = (n.get("response") or "").replace("<", "&lt;").replace(">", "&gt;")
+            rows.append(
+                f"<div class='node'>"
+                f"<p><strong>User:</strong> {p}</p>"
+                f"<p><strong>AI:</strong> {r}</p>"
+                f"</div>"
+            )
+        html = (
+            f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{title}</title>"
+            f"<style>body{{font-family:sans-serif;max-width:800px;margin:auto;padding:2rem}}"
+            f".node{{border-bottom:1px solid #eee;padding:1rem 0}}</style></head>"
+            f"<body><h1>{title}</h1>{''.join(rows)}"
+            f"<p><em>Exported {exported_at}</em></p></body></html>"
+        )
+        return Response(
+            content=html,
+            media_type="text/html",
+            headers={"Content-Disposition": f'attachment; filename="{req.root_id}.html"'},
+        )
+
+    raise HTTPException(status_code=400, detail=f"Unsupported format: {req.format}. Use json, markdown, csv, or html.")
+
+
+# --- A3. AGENT TELEMETRY (GPU + Ollama model list) ---
+@router.get("/agent-telemetry")
+async def get_agent_telemetry():
+    """
+    Extended telemetry: reuses /telemetry GPU stats and adds the list of
+    currently loaded Ollama models from /api/ps plus derived alerts.
+    """
+    # Reuse the existing telemetry logic directly
+    stats: dict = dict(await get_telemetry())
+
+    # Ollama loaded models (cached, refreshes every 10s)
+    loaded_models = await _get_ollama_loaded_models()
+
+    stats["loaded_models"] = loaded_models
+
+    # Derive alerts
+    alerts: list[str] = []
+    if stats.get("temp_c") is not None and stats["temp_c"] > 85:
+        alerts.append(f"GPU temperature critical: {stats['temp_c']}°C")
+    if stats.get("vram_gb") is not None and stats.get("vram_total_gb") is not None:
+        pct = stats["vram_gb"] / stats["vram_total_gb"] * 100
+        if pct > 90:
+            alerts.append(f"VRAM usage high: {stats['vram_gb']:.1f} / {stats['vram_total_gb']:.1f} GB")
+    stats["alerts"] = alerts
+
+    return stats

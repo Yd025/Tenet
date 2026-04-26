@@ -13,7 +13,7 @@ interface ConversationStore {
 
   // actions
   loadNodes: (nodes: ConversationNode[]) => void;
-  startConversation: (title: string) => void;
+  startConversation: (title: string) => string;
   commitMessage: (
     prompt: string,
     response: string,
@@ -25,8 +25,7 @@ interface ConversationStore {
   branchFromNode: (nodeId: string, label: string) => string;
   pruneNode: (nodeId: string) => void;
   mergeNodes: (
-    nodeIdA: string,
-    nodeIdB: string,
+    nodeIds: string[],
     synthesisResponse: string,
     mergeNodeId?: string,
   ) => void;
@@ -123,7 +122,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
     }));
   },
 
-  startConversation: (title: string) => {
+  startConversation: (title: string): string => {
     const id = crypto.randomUUID();
     const newConv: Conversation = {
       id,
@@ -137,6 +136,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       headNodeId: null,
       nodes: {},
     }));
+    return id;
   },
 
   commitMessage: (
@@ -253,22 +253,21 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
   },
 
   mergeNodes: (
-    nodeIdA: string,
-    nodeIdB: string,
+    nodeIds: string[],
     synthesisResponse: string,
     mergeNodeId?: string,
   ) => {
     const { activeConversationId } = get();
-    if (!activeConversationId) return;
+    if (!activeConversationId || nodeIds.length < 2) return;
 
     const id = mergeNodeId ?? crypto.randomUUID();
     const mergeNode: ConversationNode = {
       node_id: id,
       conversation_id: activeConversationId,
       root_id: activeConversationId,
-      parent_id: nodeIdA,
-      merge_parent_id: nodeIdB,
-      parent_ids: [nodeIdA, nodeIdB],
+      parent_id: nodeIds[0],
+      merge_parent_id: nodeIds[1],
+      parent_ids: nodeIds,
       children_ids: [],
       prompt: `⎇ Merge Synthesis`,
       response: synthesisResponse,
@@ -283,17 +282,13 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
 
     set((state) => {
       const updatedNodes = { ...state.nodes, [id]: mergeNode };
-      if (updatedNodes[nodeIdA]) {
-        updatedNodes[nodeIdA] = {
-          ...updatedNodes[nodeIdA],
-          children_ids: [...updatedNodes[nodeIdA].children_ids, id],
-        };
-      }
-      if (updatedNodes[nodeIdB]) {
-        updatedNodes[nodeIdB] = {
-          ...updatedNodes[nodeIdB],
-          children_ids: [...updatedNodes[nodeIdB].children_ids, id],
-        };
+      for (const nid of nodeIds) {
+        if (updatedNodes[nid]) {
+          updatedNodes[nid] = {
+            ...updatedNodes[nid],
+            children_ids: [...updatedNodes[nid].children_ids, id],
+          };
+        }
       }
       return { nodes: updatedNodes, headNodeId: id, selectedNodeIds: [] };
     });
