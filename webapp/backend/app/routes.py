@@ -1,7 +1,7 @@
 import os, time, json, uuid, logging, random
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from .models import Node, ChatRequest, MergeRequest, RootMergeRequest
+from .models import Node, ChatRequest, MergeRequest, RootMergeRequest, NodeSummaryRequest
 from .database import nodes_collection, conversations_collection
 import httpx
 import pynvml
@@ -73,6 +73,13 @@ def _extract_json_block(text: str) -> str:
                 return candidate
     return text
 
+
+def _limit_words(text: str, max_words: int) -> str:
+    words = text.strip().split()
+    if len(words) <= max_words:
+        return " ".join(words)
+    return " ".join(words[:max_words])
+
 # --- 1. REAL TELEMETRY ---
 @router.get("/telemetry")
 async def get_telemetry():
@@ -143,6 +150,68 @@ async def list_roots():
 async def list_conversations():
     docs = await conversations_collection.find({}).to_list(1000)
     return [serialize_node(d) for d in docs]
+
+
+@router.post("/nodes/summaries")
+async def generate_node_summaries(req: NodeSummaryRequest):
+    query = {"root_id": req.root_id}
+    if req.node_ids:
+        query["node_id"] = {"$in": req.node_ids}
+    nodes = await nodes_collection.find(query).to_list(1000)
+    if not nodes:
+        return {"summaries": []}
+
+    summaries = []
+    for node in nodes:
+        existing_metadata = node.get("metadata", {}) or {}
+        existing_title = str(existing_metadata.get("summary_title", "")).strip()
+        existing_subtitle = str(existing_metadata.get("summary_subtitle", "")).strip()
+        if existing_title and existing_subtitle:
+            summaries.append(
+                {
+                    "node_id": node["node_id"],
+                    "title": _limit_words(existing_title, 5),
+                    "subtitle": _limit_words(existing_subtitle, 20),
+                }
+            )
+            continue
+
+        summarizer_prompt = (
+            "Summarize this conversation node for a graph label.\n"
+            "Return strict JSON only with keys: title, subtitle.\n"
+            "Rules: title maximum 5 words. subtitle maximum 20 words.\n\n"
+            f"Prompt:\n{node.get('prompt', '')}\n\n"
+            f"Response:\n{node.get('response', '')}\n"
+        )
+        title = _limit_words(node.get("prompt", "") or "Node", 5)
+        subtitle = _limit_words(node.get("response", "") or node.get("prompt", "") or "Conversation node", 20)
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{OLLAMA_URL}/api/generate",
+                    json={"model": req.model, "prompt": summarizer_prompt, "stream": False},
+                )
+                resp.raise_for_status()
+                raw = resp.json().get("response", "{}")
+                parsed = json.loads(_extract_json_block(raw))
+                if isinstance(parsed, dict):
+                    parsed_title = str(parsed.get("title", "")).strip()
+                    parsed_subtitle = str(parsed.get("subtitle", "")).strip()
+                    if parsed_title:
+                        title = _limit_words(parsed_title, 5)
+                    if parsed_subtitle:
+                        subtitle = _limit_words(parsed_subtitle, 20)
+        except Exception as e:
+            logger.warning(f"Node summary generation failed for {node.get('node_id')}: {e}")
+
+        await nodes_collection.update_one(
+            {"node_id": node["node_id"]},
+            {"$set": {"metadata.summary_title": title, "metadata.summary_subtitle": subtitle}},
+        )
+        summaries.append({"node_id": node["node_id"], "title": title, "subtitle": subtitle})
+
+    return {"summaries": summaries}
 
 # --- HELPER: generate a short title from the first prompt ---
 async def generate_title(prompt: str, model: str) -> str:

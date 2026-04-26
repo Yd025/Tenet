@@ -17,6 +17,11 @@ export interface ConversationNode {
   is_merge_node: boolean;
   pruned: boolean;
   timestamp: string;
+  metadata?: {
+    summary_title?: string;
+    summary_subtitle?: string;
+    [key: string]: unknown;
+  };
 }
 
 export interface Conversation {
