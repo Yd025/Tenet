@@ -23,6 +23,8 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
   const headNodeId = useConversationStore((s) => s.headNodeId);
   const activeConversationId = useConversationStore((s) => s.activeConversationId);
   const commitMessage = useConversationStore((s) => s.commitMessage);
+  const autoBranchingEnabled = useConversationStore((s) => s.autoBranchingEnabled);
+  const setAutoBranchingEnabled = useConversationStore((s) => s.setAutoBranchingEnabled);
 
   const thread = useMemo(() => {
     if (!headNodeId) return [];
@@ -56,14 +58,16 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
 
     let fullText = '';
     let backendNodeId: string | null = null;
+    let backendParentId: string | null = null;
 
     try {
-      backendNodeId = await streamChat(
+      const streamResult = await streamChat(
         {
           prompt,
           parent_id: headNodeId,
           root_id: activeConversationId,
           model: selectedModel as ModelId,
+          auto_branching: autoBranchingEnabled,
         },
         controller.signal,
         (chunk) => {
@@ -71,9 +75,18 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
           setStreamingText(fullText);
         },
       );
+      backendNodeId = streamResult.nodeId;
+      backendParentId = streamResult.parentId;
 
       // Use the backend's node_id so parent_id on the next message matches MongoDB
-      commitMessage(prompt, fullText, selectedModel as ModelId, isSensitive, backendNodeId ?? undefined);
+      commitMessage(
+        prompt,
+        fullText,
+        selectedModel as ModelId,
+        isSensitive,
+        backendNodeId ?? undefined,
+        backendParentId,
+      );
       setStreamingText('');
       setPendingPrompt(null);
     } catch (err: unknown) {
@@ -151,7 +164,12 @@ export default function ChatView({ selectedModel }: ChatViewProps) {
       </div>
 
       <div className="flex-shrink-0">
-        <CommitInputBar onCommit={handleCommit} isLoading={isLoading} />
+        <CommitInputBar
+          onCommit={handleCommit}
+          isLoading={isLoading}
+          autoBranchingEnabled={autoBranchingEnabled}
+          onToggleAutoBranching={() => setAutoBranchingEnabled(!autoBranchingEnabled)}
+        />
       </div>
     </div>
   );

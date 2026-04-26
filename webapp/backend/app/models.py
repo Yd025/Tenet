@@ -8,6 +8,7 @@ class ChatRequest(BaseModel):
     root_id: str
     model: str
     is_sensitive: bool = False
+    auto_branching: bool = False
 
 class Node(BaseModel):
     node_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -22,6 +23,7 @@ class MergeRequest(BaseModel):
     node_ids: List[str]
     root_id: str
     model: str = "gemma4"
+    conflict_resolutions: Optional[List[Dict[str, Any]]] = None
 
 class RootMergeRequest(BaseModel):
     root_ids: List[str]

@@ -15,6 +15,7 @@ from uagents.protocol import Protocol
 from config.agent_config import AgentConfig
 from protocols.branch_protocol import BranchAction, BranchRequest
 from protocols.chat_protocol import ChatRequest, ExecutionLocation
+from utils.auto_branch_selector import choose_best_parent_node
 from utils.local_runtime import capability_registry, dag_store, memory_store, router
 
 
@@ -100,6 +101,17 @@ def process_gateway_request(msg: GatewayRequest) -> GatewayResponse:
         chat = ChatRequest(**payload)
         privacy = router.analyze_privacy(chat.prompt, chat.privacy_level.value)
         specialist = _resolve_specialist(chat.prompt, privacy["privacy_level"])
+        context = chat.context or {}
+        parent_id = context.get("parent_id")
+        selector_meta = {}
+        if context.get("auto_branching"):
+            parent_id, selector_meta = choose_best_parent_node(
+                dag_store=dag_store,
+                conversation_id=chat.conversation_id,
+                branch_id=chat.branch_id,
+                prompt=chat.prompt,
+                model_name=config.DEFAULT_LOCAL_MODEL,
+            )
         response_text = (
             f"Gateway local response for '{chat.prompt[:80]}'. "
             "Processed through local-only orchestration."
@@ -107,7 +119,7 @@ def process_gateway_request(msg: GatewayRequest) -> GatewayResponse:
         node = dag_store.add_node(
             conversation_id=chat.conversation_id,
             branch_id=chat.branch_id,
-            parent_id=(chat.context or {}).get("parent_id") if chat.context else None,
+            parent_id=parent_id,
             prompt=chat.prompt,
             response=response_text,
             model_used=config.DEFAULT_LOCAL_MODEL,
@@ -116,6 +128,9 @@ def process_gateway_request(msg: GatewayRequest) -> GatewayResponse:
                 "privacy_level": privacy["privacy_level"],
                 "gateway": True,
                 "selected_specialist_agent": specialist.get("agent_name") if specialist else "tenet-orchestrator",
+                "auto_branching": bool(context.get("auto_branching")),
+                "selected_parent_id": parent_id,
+                "selector_meta": selector_meta,
             },
         )
         memory_store.store(node, chat.conversation_id, node.get("branch_id"))

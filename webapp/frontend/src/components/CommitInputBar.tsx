@@ -4,9 +4,16 @@ import { GitBranch, Lock, Unlock } from 'lucide-react';
 interface CommitInputBarProps {
   onCommit: (prompt: string, isSensitive: boolean) => Promise<void>;
   isLoading: boolean;
+  autoBranchingEnabled: boolean;
+  onToggleAutoBranching: () => void;
 }
 
-export default function CommitInputBar({ onCommit, isLoading }: CommitInputBarProps) {
+export default function CommitInputBar({
+  onCommit,
+  isLoading,
+  autoBranchingEnabled,
+  onToggleAutoBranching,
+}: CommitInputBarProps) {
   const [input, setInput] = useState('');
   const [isSensitive, setIsSensitive] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -52,6 +59,19 @@ export default function CommitInputBar({ onCommit, isLoading }: CommitInputBarPr
           }`}
         >
           {isSensitive ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+        </button>
+
+        <button
+          onClick={onToggleAutoBranching}
+          type="button"
+          title="Automatically pick the best node to branch from"
+          className={`flex-shrink-0 rounded-md px-2 py-1 text-xs border transition-colors ${
+            autoBranchingEnabled
+              ? 'border-tenet-teal text-tenet-teal bg-tenet-teal/10'
+              : 'border-tenet-border text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          Auto Branch
         </button>
 
         {/* Commit button */}

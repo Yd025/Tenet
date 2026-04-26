@@ -2,6 +2,7 @@ from uagents import Agent, Context
 from protocols.chat_protocol import ChatRequest, ChatResponse, chat_protocol, ExecutionLocation
 from protocols.branch_protocol import BranchRequest, BranchResponse, branch_protocol, BranchAction
 from config.agent_config import AgentConfig
+from utils.auto_branch_selector import choose_best_parent_node
 from utils.local_runtime import dag_store, memory_store, router, capability_registry
 import time
 
@@ -49,11 +50,25 @@ class TenetOrchestrator:
                     self.performance_metrics["local_requests"] += 1
                 else:
                     self.performance_metrics["cloud_requests"] += 1
+                context = msg.context or {}
+                parent_id = context.get("parent_id")
+                selector_meta = {}
+                if context.get("auto_branching"):
+                    parent_id, selector_meta = choose_best_parent_node(
+                        dag_store=dag_store,
+                        conversation_id=msg.conversation_id,
+                        branch_id=msg.branch_id,
+                        prompt=msg.prompt,
+                        model_name=self.config.DEFAULT_LOCAL_MODEL,
+                    )
+                    response_data["metadata"]["auto_branching"] = True
+                    response_data["metadata"]["selector_meta"] = selector_meta
+                    response_data["metadata"]["selected_parent_id"] = parent_id
 
                 node = dag_store.add_node(
                     conversation_id=msg.conversation_id,
                     branch_id=msg.branch_id,
-                    parent_id=(msg.context or {}).get("parent_id") if msg.context else None,
+                    parent_id=parent_id,
                     prompt=msg.prompt,
                     response=response_data["response"],
                     model_used=response_data["model_used"],
