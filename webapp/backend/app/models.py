@@ -29,3 +29,9 @@ class RootMergeRequest(BaseModel):
     root_ids: List[str]
     new_root_name: str
     model: str = "gemma4"
+
+
+class NodeSummaryRequest(BaseModel):
+    root_id: str
+    node_ids: Optional[List[str]] = None
+    model: str = "gemma4"

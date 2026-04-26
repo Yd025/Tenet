@@ -10,6 +10,10 @@ export interface ConversationNodeData {
   onBranch: (id: string) => void;
   onPrune: (id: string) => void;
   onSelect: (id: string) => void;
+  onPreview: (id: string) => void;
+  onHoverStart: (id: string, event: React.MouseEvent) => void;
+  onHoverMove: (id: string, event: React.MouseEvent) => void;
+  onHoverEnd: () => void;
 }
 
 interface ConversationNodeSVGProps {
@@ -54,6 +58,9 @@ export default function ConversationNodeSVG({
       transform={`translate(${x},${y})`}
       onClick={handleClick}
       onContextMenu={handleCtx}
+      onMouseEnter={(e) => data.onHoverStart(data.nodeId, e)}
+      onMouseMove={(e) => data.onHoverMove(data.nodeId, e)}
+      onMouseLeave={data.onHoverEnd}
       style={{ cursor: 'pointer' }}
     >
       {gradientId && (
@@ -116,17 +123,6 @@ export default function ConversationNodeSVG({
         dominantBaseline="auto"
       >
         {data.label}
-      </text>
-
-      {/* Sublabel */}
-      <text
-        x={NODE_RADIUS + 8}
-        y={12}
-        fill="#6b7280"
-        fontSize={10}
-        dominantBaseline="auto"
-      >
-        {data.sublabel}
       </text>
 
       {/* Invisible hit area for easier clicking */}

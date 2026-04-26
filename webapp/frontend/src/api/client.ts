@@ -62,6 +62,14 @@ export interface MergeResult {
   conflicts: MergeConflict[];
 }
 
+export interface NodeSummaryResult {
+  summaries: Array<{
+    node_id: string;
+    title: string;
+    subtitle: string;
+  }>;
+}
+
 // POST /chat/stream — streams tokens via SSE, returns the backend node_id when done.
 export function streamChat(
   params: StreamChatParams,
@@ -220,4 +228,22 @@ export async function fetchConversations(): Promise<{ root_id: string; title: st
   const response = await fetch(`${API_BASE}/conversations`);
   if (!response.ok) return [];
   return response.json();
+}
+
+// POST /api/nodes/summaries
+export async function fetchNodeSummaries(params: {
+  root_id: string;
+  node_ids?: string[];
+  model?: ModelId;
+}): Promise<NodeSummaryResult> {
+  const response = await fetch(`${API_BASE}/nodes/summaries`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      root_id: params.root_id,
+      node_ids: params.node_ids ?? null,
+      model: params.model ?? 'gemma4',
+    }),
+  });
+  return handleResponse(response);
 }

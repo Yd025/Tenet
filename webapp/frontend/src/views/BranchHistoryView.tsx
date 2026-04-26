@@ -5,9 +5,9 @@ import { zoom as d3Zoom, zoomIdentity } from 'd3-zoom';
 import { select } from 'd3-selection';
 
 import { useConversationStore } from '../store/useConversationStore';
-import { fetchMerge } from '../api/client';
+import { fetchMerge, fetchNodeSummaries } from '../api/client';
 import type { MergeConflict, MergeResolution } from '../api/client';
-import type { ConversationNode } from '../types';
+import type { ConversationNode, ModelId } from '../types';
 import ConversationNodeSVG from '../components/ConversationNode';
 import type { ConversationNodeData } from '../components/ConversationNode';
 
@@ -39,26 +39,23 @@ function buildLabels(storeNodes: Record<string, ConversationNode>) {
     .filter((n) => !n.pruned)
     .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-  let trunkCount = 0;
-  let branchCount = 0;
   const labelMap: Record<string, string> = {};
   const sublabelMap: Record<string, string> = {};
 
   for (const node of activeNodes) {
-    if (node.branch_label) {
-      branchCount += 1;
-      const parentLabel = node.parent_id ? (labelMap[node.parent_id] ?? '?') : '?';
-      labelMap[node.node_id] = `b${branchCount}/${parentLabel}`;
-      sublabelMap[node.node_id] = node.prompt.slice(0, 38) || node.branch_label;
-    } else if (node.is_merge_node) {
-      trunkCount += 1;
-      labelMap[node.node_id] = `v${trunkCount}`;
-      sublabelMap[node.node_id] = '\u238B Merge';
-    } else {
-      trunkCount += 1;
-      labelMap[node.node_id] = `v${trunkCount}`;
-      sublabelMap[node.node_id] = node.prompt.slice(0, 38) || 'Node';
-    }
+    const metadata = node.metadata ?? {};
+    const fallbackTitle = (node.prompt || (node.is_merge_node ? 'Merged node' : 'Conversation node'))
+      .trim()
+      .split(/\s+/)
+      .slice(0, 5)
+      .join(' ');
+    const fallbackSubtitle = (node.response || node.prompt || 'Node details')
+      .trim()
+      .split(/\s+/)
+      .slice(0, 20)
+      .join(' ');
+    labelMap[node.node_id] = (metadata.summary_title as string) || fallbackTitle;
+    sublabelMap[node.node_id] = (metadata.summary_subtitle as string) || fallbackSubtitle;
   }
 
   return { labelMap, sublabelMap };
@@ -91,6 +88,7 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
   const [pendingMergePair, setPendingMergePair] = useState<{ a: string; b: string } | null>(null);
   const [mergeConflicts, setMergeConflicts] = useState<MergeConflict[]>([]);
   const [conflictResolutions, setConflictResolutions] = useState<Record<string, MergeResolution>>({});
+  const [hoverPreview, setHoverPreview] = useState<{ nodeId: string; x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (!ctxMenu) return;
@@ -112,9 +110,65 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
       },
       onPrune: pruneNode,
       onSelect: selectNodeForMerge,
+      onPreview: () => undefined,
+      onHoverStart: (id: string, event: React.MouseEvent) => {
+        setHoverPreview({ nodeId: id, x: event.clientX + 14, y: event.clientY + 14 });
+      },
+      onHoverMove: (id: string, event: React.MouseEvent) => {
+        setHoverPreview({ nodeId: id, x: event.clientX + 14, y: event.clientY + 14 });
+      },
+      onHoverEnd: () => {
+        setHoverPreview(null);
+      },
     }),
     [checkoutNode, branchFromNode, pruneNode, selectNodeForMerge, clearMergeSelection],
   );
+
+  useEffect(() => {
+    if (!activeConversationId) return;
+    const activeNodes = Object.values(storeNodes).filter((n) => !n.pruned);
+    if (activeNodes.length === 0) return;
+    const missingIds = activeNodes
+      .filter((n) => !(n.metadata?.summary_title && n.metadata?.summary_subtitle))
+      .map((n) => n.node_id);
+    if (missingIds.length === 0) return;
+
+    let isCancelled = false;
+    async function hydrateSummaries() {
+      try {
+        const result = await fetchNodeSummaries({
+          root_id: activeConversationId,
+          node_ids: missingIds,
+          model: selectedModel as ModelId,
+        });
+        if (isCancelled) return;
+        const byId = new Map(result.summaries.map((s) => [s.node_id, s]));
+        useConversationStore.setState((state) => {
+          const nextNodes = { ...state.nodes };
+          for (const [nodeId, summary] of byId.entries()) {
+            const existing = nextNodes[nodeId];
+            if (!existing) continue;
+            nextNodes[nodeId] = {
+              ...existing,
+              metadata: {
+                ...(existing.metadata ?? {}),
+                summary_title: summary.title,
+                summary_subtitle: summary.subtitle,
+              },
+            };
+          }
+          return { nodes: nextNodes };
+        });
+      } catch (err) {
+        console.error('Failed to load node summaries', err);
+      }
+    }
+
+    hydrateSummaries();
+    return () => {
+      isCancelled = true;
+    };
+  }, [activeConversationId, storeNodes, selectedModel]);
 
   const { layoutNodes, mergeEdges } = useMemo(() => {
     const treeData = buildTreeData(storeNodes);
@@ -181,6 +235,8 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
 
     zoomBehaviorRef.current = zoomBehavior;
     select(svg).call(zoomBehavior);
+    // Let node double-click open preview instead of triggering zoom-in.
+    select(svg).on('dblclick.zoom', null);
 
     return () => {
       select(svg).on('.zoom', null);
@@ -517,6 +573,26 @@ export default function BranchHistoryView({ setActiveTab, selectedModel }: Branc
                 {mergeLoading ? 'Merging…' : 'Resolve and Merge'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Small hover preview */}
+      {hoverPreview && storeNodes[hoverPreview.nodeId] && (
+        <div
+          className="fixed z-40 w-80 max-w-[85vw] border border-tenet-border rounded-lg bg-tenet-surface/95 backdrop-blur px-3 py-2 pointer-events-none"
+          style={{ left: hoverPreview.x, top: hoverPreview.y }}
+        >
+          <div className="text-xs font-semibold text-white truncate">
+            {(storeNodes[hoverPreview.nodeId].metadata?.summary_title as string) || 'Node Preview'}
+          </div>
+          <div className="mt-1 text-[11px] text-gray-200">
+            {storeNodes[hoverPreview.nodeId].prompt.slice(0, 120)}
+            {storeNodes[hoverPreview.nodeId].prompt.length > 120 ? '…' : ''}
+          </div>
+          <div className="mt-1 text-[11px] text-gray-300">
+            {storeNodes[hoverPreview.nodeId].response.slice(0, 220)}
+            {storeNodes[hoverPreview.nodeId].response.length > 220 ? '…' : ''}
           </div>
         </div>
       )}
